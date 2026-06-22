@@ -84,6 +84,22 @@ solar-power-forecast forecast \
   --out data/output/sample_forecast_daily.csv
 ```
 
+## ダッシュボード
+
+予測結果CSVと地点CSVを地理院タイル上に表示する簡易ダッシュボード。
+
+```bash
+python -m http.server 8765 --bind 127.0.0.1
+```
+
+ブラウザで次を開く。
+
+```text
+http://127.0.0.1:8765/dashboard/
+```
+
+現時点では、設備ごとの緯度経度ではなく都道府県代表点を発電地点としてプロットする。
+
 ## FIT/FIP公表値から設備容量を作る
 
 例：1MW以上の太陽光を数県だけ集計。
