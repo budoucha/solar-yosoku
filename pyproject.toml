@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "solar-power-forecast"
+version = "0.1.0"
+description = "Prototype for estimating Japanese solar PV generation from FIT/FIP public capacity data and JMA-based irradiance forecasts."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+  { name = "Budoucha Tunnae" }
+]
+dependencies = [
+  "pandas>=2.0",
+  "openpyxl>=3.1",
+  "requests>=2.31",
+  "beautifulsoup4>=4.12"
+]
+
+[project.scripts]
+solar-power-forecast = "solar_power_forecast.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

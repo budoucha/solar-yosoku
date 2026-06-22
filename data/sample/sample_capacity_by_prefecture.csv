@@ -1,0 +1,5 @@
+prefecture,capacity_kw,plant_count,min_kw,note
+茨城県,1500000,300,sample,架空サンプル。実運用ではbuild-capacityでFIT公表値から作る
+千葉県,900000,180,sample,架空サンプル。実運用ではbuild-capacityでFIT公表値から作る
+鹿児島県,1200000,220,sample,架空サンプル。実運用ではbuild-capacityでFIT公表値から作る
+北海道,2000000,400,sample,架空サンプル。実運用ではbuild-capacityでFIT公表値から作る

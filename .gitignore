@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+
+# Build
+build/
+dist/
+
+# Local output data
+data/output/
+data/fit_raw/
+data/*.csv
+!data/prefecture_points.csv
+!data/sample/*.csv
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
