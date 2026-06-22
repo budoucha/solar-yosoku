@@ -17,6 +17,9 @@ data/*.csv
 !data/prefecture_points.csv
 !data/sample/*.csv
 
+# Local tools
+.tools/
+
 # OS / editor
 .DS_Store
 Thumbs.db
