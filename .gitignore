@@ -11,11 +11,18 @@ build/
 dist/
 
 # Local output data
-data/output/
+data/output/*
 data/fit_raw/
 data/*.csv
 !data/prefecture_points.csv
 !data/sample/*.csv
+# ダッシュボードに必要なものだけ通す
+!data/output/capacity_by_prefecture.csv
+!data/output/solar_facilities_geocoded.csv
+!data/output/geocode_cache.csv
+
+# ログ
+*.log
 
 # Local tools
 .tools/

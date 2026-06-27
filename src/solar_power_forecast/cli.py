@@ -30,6 +30,7 @@ from bs4 import BeautifulSoup
 
 FIT_PUBLICINFO_URL = "https://www.fit-portal.go.jp/publicinfo"
 OPEN_METEO_JMA_URL = "https://api.open-meteo.com/v1/jma"
+GSI_GEOCODE_URL = "https://msearch.gsi.go.jp/address-search/AddressSearch"
 
 PREFECTURES = [
     "北海道","青森県","岩手県","宮城県","秋田県","山形県","福島県",
@@ -124,12 +125,24 @@ def pick_col(columns, patterns: list[str]) -> str | None:
     return best
 
 
+def is_facility_sheet(sheet_name: str) -> bool:
+    """FIT公表Excelは「認定設備」=1行1施設、「すべての設備の所在地」=1行1区画。
+    後者は同一施設IDが多区画ぶん複製され出力kWも全行に重複するので集計に使うと多重計上になる。
+    施設一覧として正しいのは前者だけ。"""
+    name = norm_text(sheet_name)
+    if "所在地" in name:
+        return False
+    return "認定" in name or "設備" in name
+
+
 def read_fit_file(path: Path, prefecture: str, min_kw: float, exclude_inactive: bool = True) -> pd.DataFrame:
     """都道府県Excelから太陽光設備の候補行を抽出する。列名変更に耐えるためヒューリスティックで読む。"""
     xls = pd.ExcelFile(path)
     frames = []
 
     for sheet in xls.sheet_names:
+        if not is_facility_sheet(sheet):
+            continue
         raw = pd.read_excel(path, sheet_name=sheet, header=None, dtype=object)
         header = find_header_row(raw)
         if header is None:
@@ -220,6 +233,14 @@ def build_capacity(args):
     if details.empty:
         raise RuntimeError("対象設備を抽出できなかった。Excel列名または閾値を確認して。")
 
+    if "facility_id" in details.columns:
+        before = len(details)
+        details = details.dropna(subset=["facility_id"])
+        details = details[details["facility_id"].astype(str).str.len() > 0]
+        details = details.drop_duplicates(subset=["facility_id"], keep="first")
+        if before != len(details):
+            print(f"dedupe by facility_id: {before} -> {len(details)}")
+
     summary = (
         details.groupby("prefecture", as_index=False)
         .agg(capacity_kw=("capacity_kw", "sum"), plant_count=("capacity_kw", "count"))
@@ -251,6 +272,7 @@ def fetch_open_meteo_jma(lat: float, lon: float, forecast_days: int, tilt: float
             "temperature_2m",
             "cloud_cover",
             "sunshine_duration",
+            "precipitation",
         ]),
         "daily": ",".join([
             "shortwave_radiation_sum",
@@ -315,8 +337,9 @@ def forecast(args):
         ghi = get_hourly_series(hourly, "shortwave_radiation")
         temp = get_hourly_series(hourly, "temperature_2m")
         cloud = get_hourly_series(hourly, "cloud_cover")
+        precip = get_hourly_series(hourly, "precipitation")
 
-        for t, gti_wm2, ghi_wm2, temp_c, cloud_pct in zip(times, gti, ghi, temp, cloud):
+        for t, gti_wm2, ghi_wm2, temp_c, cloud_pct, precip_mm in zip(times, gti, ghi, temp, cloud, precip):
             gti_wm2 = 0 if gti_wm2 is None else max(float(gti_wm2), 0.0)
             # W/m2平均 * 1h = Wh/m2。kWh/m2にするには1000で割る。
             gti_kwh_m2 = gti_wm2 / 1000.0
@@ -330,6 +353,7 @@ def forecast(args):
                 "ghi_w_m2": ghi_wm2,
                 "temperature_c": temp_c,
                 "cloud_cover_pct": cloud_pct,
+                "precipitation_mm": 0.0 if precip_mm is None else float(precip_mm),
                 "estimated_kwh": estimated_kwh,
                 "estimated_mwh": estimated_kwh / 1000.0,
                 "performance_ratio": args.performance_ratio,
@@ -353,6 +377,7 @@ def forecast(args):
             estimated_mwh=("estimated_mwh", "sum"),
             mean_cloud_cover_pct=("cloud_cover_pct", "mean"),
             mean_temperature_c=("temperature_c", "mean"),
+            precipitation_mm_sum=("precipitation_mm", "sum"),
             representative_city=("representative_city", "first"),
             latitude=("latitude", "first"),
             longitude=("longitude", "first"),
@@ -369,6 +394,124 @@ def forecast(args):
         Path(args.hourly_out).parent.mkdir(parents=True, exist_ok=True)
         hdf.to_csv(args.hourly_out, index=False, encoding="utf-8-sig")
         print(f"wrote: {args.hourly_out}")
+
+
+_ADDR_NORMALIZE_PATTERNS = [
+    (re.compile(r"地内$"), ""),
+    (re.compile(r"地先$"), ""),
+    (re.compile(r"先$"), ""),
+    (re.compile(r"外$"), ""),
+    (re.compile(r"他$"), ""),
+    (re.compile(r"番地?$"), ""),
+    (re.compile(r"大字"), ""),
+    (re.compile(r"字"), ""),
+    (re.compile(r"[‐−–—―ー－]"), "-"),
+    (re.compile(r"\s+"), ""),
+]
+
+
+def normalize_jp_address(addr: str) -> list[str]:
+    """ジオコーディング用に住所候補を生成する。フル住所→末尾を段階的に削り倒した候補を返す。"""
+    base = norm_text(addr)
+    if not base:
+        return []
+    for pat, repl in _ADDR_NORMALIZE_PATTERNS:
+        base = pat.sub(repl, base)
+
+    candidates = [base]
+    # 「市名町名字以下」を削った候補を順に追加（番地が見つからないことが多いので有効）
+    truncated = re.sub(r"[-\d０-９一二三四五六七八九十].*$", "", base)
+    if truncated and truncated != base:
+        candidates.append(truncated)
+    # さらに先頭の都道府県+市区町村だけ
+    municipality = re.match(r"(.+?[都道府県].+?[市区町村郡])", base)
+    if municipality:
+        muni = municipality.group(1)
+        if muni not in candidates:
+            candidates.append(muni)
+    return candidates
+
+
+def geocode_one(address: str, session: requests.Session, retries: int = 2) -> tuple[float, float, str] | None:
+    """GSIジオコーダで住所→(lat, lon, matched_address)。失敗時はNone。"""
+    for query in normalize_jp_address(address):
+        for attempt in range(retries + 1):
+            try:
+                r = session.get(
+                    GSI_GEOCODE_URL,
+                    params={"q": query},
+                    timeout=15,
+                    headers={"User-Agent": "solar-yosoku/0.1"},
+                )
+                if r.status_code == 200 and r.text.strip():
+                    data = r.json()
+                    if data:
+                        coords = data[0]["geometry"]["coordinates"]
+                        title = data[0].get("properties", {}).get("title", query)
+                        return float(coords[1]), float(coords[0]), title
+                break
+            except (requests.RequestException, ValueError):
+                if attempt == retries:
+                    break
+                time.sleep(0.5 * (attempt + 1))
+    return None
+
+
+def geocode(args):
+    src = pd.read_csv(args.detail)
+    if "address" not in src.columns:
+        raise RuntimeError(f"{args.detail} に address 列がない")
+
+    src = src[src["capacity_kw"] >= args.min_kw].copy()
+    src = src.dropna(subset=["address"])
+    print(f"geocode targets: {len(src)} (min_kw={args.min_kw})")
+
+    cache: dict[str, tuple[float, float, str]] = {}
+    if args.cache and Path(args.cache).exists():
+        cdf = pd.read_csv(args.cache)
+        for _, row in cdf.iterrows():
+            cache[row["address"]] = (float(row["latitude"]), float(row["longitude"]), str(row.get("matched_address", "")))
+        print(f"loaded cache: {len(cache)} entries")
+
+    session = requests.Session()
+    lats, lons, matched = [], [], []
+    miss = 0
+    new_cache_rows = []
+
+    for i, addr in enumerate(src["address"].tolist(), 1):
+        if addr in cache:
+            lat, lon, m = cache[addr]
+        else:
+            result = geocode_one(addr, session)
+            if result is None:
+                lat = lon = float("nan")
+                m = ""
+                miss += 1
+            else:
+                lat, lon, m = result
+                cache[addr] = result
+                new_cache_rows.append({"address": addr, "latitude": lat, "longitude": lon, "matched_address": m})
+            time.sleep(args.sleep)
+        lats.append(lat)
+        lons.append(lon)
+        matched.append(m)
+        if i % 50 == 0:
+            print(f"  {i}/{len(src)}  miss={miss}")
+
+    src["latitude"] = lats
+    src["longitude"] = lons
+    src["matched_address"] = matched
+
+    Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+    src.to_csv(args.out, index=False, encoding="utf-8-sig")
+    print(f"wrote: {args.out}  matched={len(src)-miss}/{len(src)}")
+
+    if args.cache and new_cache_rows:
+        existing = pd.read_csv(args.cache) if Path(args.cache).exists() else pd.DataFrame()
+        merged = pd.concat([existing, pd.DataFrame(new_cache_rows)], ignore_index=True).drop_duplicates("address", keep="last")
+        Path(args.cache).parent.mkdir(parents=True, exist_ok=True)
+        merged.to_csv(args.cache, index=False, encoding="utf-8-sig")
+        print(f"updated cache: {args.cache} ({len(merged)} entries)")
 
 
 def main():
@@ -397,6 +540,14 @@ def main():
     p.add_argument("--out", default="data/forecast_by_prefecture_daily.csv")
     p.add_argument("--hourly-out", default="data/forecast_by_prefecture_hourly.csv")
     p.set_defaults(func=forecast)
+
+    p = sub.add_parser("geocode", help="施設詳細CSVの住所をGSI APIで緯度経度に変換")
+    p.add_argument("--detail", default="data/output/solar_facilities_detail.csv")
+    p.add_argument("--out", default="data/output/solar_facilities_geocoded.csv")
+    p.add_argument("--min-kw", type=float, default=5000.0, help="対象にする最小設備容量[kW]")
+    p.add_argument("--sleep", type=float, default=0.3, help="リクエスト間隔[秒]")
+    p.add_argument("--cache", default="data/output/geocode_cache.csv")
+    p.set_defaults(func=geocode)
 
     args = parser.parse_args()
     args.func(args)

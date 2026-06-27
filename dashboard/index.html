@@ -7,8 +7,6 @@
     <link
       rel="stylesheet"
       href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
-      integrity="sha256-p4NxAoJBhIINfQqgf0ujrj8E6J5dN0P4rJZpTg5bM2M="
-      crossorigin=""
     >
     <link rel="stylesheet" href="./styles.css">
   </head>
@@ -19,17 +17,29 @@
           <p class="eyebrow">Solar Power Forecast</p>
           <h1>全国発電地点ダッシュボード</h1>
         </div>
-        <div class="source-badge">地図: 国土地理院</div>
+        <div class="source-badge">白地図: TopoJSON</div>
       </header>
 
       <main class="dashboard-grid">
         <section class="map-section" aria-label="全国地図">
           <div id="map"></div>
           <div class="legend" aria-label="凡例">
-            <span class="legend-dot low"></span><span>低</span>
-            <span class="legend-bar"></span>
-            <span class="legend-dot high"></span><span>高</span>
-            <strong>推定発電量</strong>
+            <strong class="legend-heading">県別 推定発電量（円）</strong>
+            <div class="legend-row">
+              <span class="legend-dot low"></span><span>低</span>
+              <span class="legend-bar"></span>
+              <span class="legend-dot high"></span><span>高</span>
+            </div>
+            <strong class="legend-heading">個別施設 (予想発電率)</strong>
+            <div class="legend-row">
+              <span class="legend-facility-bar"></span>
+            </div>
+            <div class="legend-gti-labels"><span>0%</span><span>15%</span><span>30%+</span></div>
+            <strong class="legend-heading">天気（面）</strong>
+            <div class="legend-row">
+              <span class="legend-weather-bar"></span>
+            </div>
+            <div class="legend-gti-labels"><span>晴れ</span><span>曇り</span></div>
           </div>
         </section>
 
@@ -37,6 +47,11 @@
           <div class="summary-head">
             <p class="eyebrow">Overview</p>
             <h2 id="summary-date">--</h2>
+          </div>
+          <div class="horizon-control" role="radiogroup" aria-label="予測時間軸">
+            <label><input type="radio" name="horizon" value="now"> 現在</label>
+            <label><input type="radio" name="horizon" value="today" checked> 当日</label>
+            <label><input type="radio" name="horizon" value="tomorrow"> 翌日</label>
           </div>
           <div class="metric-grid">
             <div class="metric">
@@ -48,34 +63,35 @@
               <strong id="metric-capacity">--</strong>
             </div>
             <div class="metric">
-              <span>推定発電量</span>
+              <span id="metric-generation-label">推定発電量</span>
               <strong id="metric-generation">--</strong>
             </div>
             <div class="metric">
-              <span>最大設備利用率</span>
+              <span id="metric-capacity-factor-label">最大設備利用率</span>
               <strong id="metric-capacity-factor">--</strong>
             </div>
-          </div>
-
-          <div class="rank-section">
-            <div class="section-title">
-              <h3>推定発電量</h3>
-              <span>MWh</span>
-            </div>
-            <div id="bars" class="bars"></div>
           </div>
 
           <div class="rank-section table-wrap">
             <div class="section-title">
               <h3>地点一覧</h3>
-              <span id="data-status">loading</span>
+              <div class="status-stack">
+                <span id="data-status">loading</span>
+                <span id="forecast-status">予測取得中…</span>
+                <span id="facility-status">施設予測取得中…</span>
+              </div>
+            </div>
+            <div class="table-actions">
+              <button type="button" id="prefs-all-on">全表示</button>
+              <button type="button" id="prefs-all-off">全非表示</button>
             </div>
             <table>
               <thead>
                 <tr>
+                  <th><input type="checkbox" id="prefs-master" checked title="全表示/全非表示"></th>
                   <th>地点</th>
                   <th>容量</th>
-                  <th>発電量</th>
+                  <th id="th-generation">発電量</th>
                   <th>CF</th>
                 </tr>
               </thead>
@@ -86,11 +102,9 @@
       </main>
     </div>
 
-    <script
-      src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
-      integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
-      crossorigin=""
-    ></script>
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="https://unpkg.com/topojson-client@3"></script>
+    <script src="./solar.js"></script>
     <script src="./app.js"></script>
   </body>
 </html>
