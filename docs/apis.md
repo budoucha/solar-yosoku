@@ -30,7 +30,7 @@
 - **バッチ**: 不可。1座標 = 1リクエスト
 - **必須ヘッダ**: User-Agent に連絡先（ブラウザでは自動付与に依存。フォールバック用に Sitename ヘッダ）
 - **レート**: 公式キャップ非公開、ガイドは "be sensible / cache aggressively"
-- **キャッシュ戦略**: `If-Modified-Since` を保持し、再取得時に 304 で帰ってきたらキャッシュ延命
+- **キャッシュ戦略**: 合成済み hourly と `Last-Modified` を同じ localStorage エントリに保持し、再取得時に 304 が返ってきたら旧 hourly の `savedAt` を更新して延命
 - **取得値**: `properties.timeseries[].data.instant.details.cloud_area_fraction` [%]
 
 #### 本ダッシュボードでの運用
@@ -43,12 +43,13 @@
 | リクエスト間隔 | 120 ms（礼儀正しいペース）|
 | 完走時間 | 約 25〜35 秒 |
 | TTL | 1 時間 (`HYBRID_CACHE_TTL_MS`) |
-| 永続キャッシュ | localStorage `facility_forecast_hybrid_v1`, `pref_forecast_hybrid_v1`, `yr_last_modified_v1` |
+| 永続キャッシュ | localStorage `facility_forecast_hybrid_v1`, `pref_forecast_hybrid_v1` |
 
 ### 合成計算
 
 ```
 ClearSky_GHI(lat, lon, t)       ← ②
+  × NASA月別平年GHI / ClearSky月平均GHI ← ① (月別・最寄り県レコード)
   × (1 - 0.75 × (CC/100)^3.4)   ← ③ (Kasten-Czeplak 非線形)
   → 推定 GHI [W/m²]
   → GTI ≈ GHI × cos(|lat| - 30°)

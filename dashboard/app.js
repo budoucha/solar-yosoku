@@ -26,8 +26,11 @@ const PERFORMANCE_RATIO = 0.80;
 const TILT_DEG = 30.0;
 const AZIMUTH_DEG = 0.0;
 const FORECAST_MODEL = "jma_seamless";
+const BASELINE_SCALE_MIN = 0.25;
+const BASELINE_SCALE_MAX = 1.25;
 
 let baselineByPref = null;  // { 県名: { lat, lon, monthly_ghi_kwh_m2_day: [12] } }
+let baselineScaleCache = new Map();
 
 const HORIZONS = ["now", "today", "tomorrow"];
 let currentHorizon = "today";
@@ -615,6 +618,16 @@ function pickSeries(hourly, base) {
 
 // === yr.no + ClearSky 合成パス ============================================
 
+function hasUsableHourly(hourly) {
+  return (
+    hourly
+    && Array.isArray(hourly.times)
+    && Array.isArray(hourly.gti)
+    && Array.isArray(hourly.cloud)
+    && hourly.times.length > 0
+  );
+}
+
 // "2026-06-27T00:00:00Z" → "2026-06-27T09" (JST 時刻文字列)
 function utcIsoToJstHourString(utcIso) {
   const d = new Date(utcIso);
@@ -642,11 +655,68 @@ function buildClearSkyHourly(lat, lon) {
   return { times, clearGhi };
 }
 
+function clearSkyDailyKwhForMonth(lat, lon, monthIndex) {
+  const year = 2021; // 非うるう年。日射平年値との月平均比較用なので固定する。
+  const days = new Date(Date.UTC(year, monthIndex + 1, 0)).getUTCDate();
+  let sum = 0;
+  for (let day = 1; day <= days; day += 1) {
+    for (let hour = 0; hour < 24; hour += 1) {
+      const t = new Date(Date.UTC(year, monthIndex, day, hour) - 9 * 3600 * 1000);
+      sum += window.Solar.clearSkyGHI(lat, lon, t) / 1000;
+    }
+  }
+  return sum / days;
+}
+
+function findNearestBaseline(lat, lon) {
+  if (!baselineByPref) return null;
+  let best = null;
+  let bestDist = Infinity;
+  for (const [prefecture, entry] of Object.entries(baselineByPref)) {
+    const entryLat = Number(entry?.lat);
+    const entryLon = Number(entry?.lon);
+    const monthly = entry?.monthly_ghi_kwh_m2_day;
+    if (!Number.isFinite(entryLat) || !Number.isFinite(entryLon) || !Array.isArray(monthly)) continue;
+    const dLat = lat - entryLat;
+    const dLon = lon - entryLon;
+    const dist = dLat * dLat + dLon * dLon;
+    if (dist < bestDist) {
+      best = { prefecture, entry };
+      bestDist = dist;
+    }
+  }
+  return best;
+}
+
+function baselineScaleFactorsForPoint(lat, lon) {
+  const nearest = findNearestBaseline(lat, lon);
+  if (!nearest) return null;
+  if (baselineScaleCache.has(nearest.prefecture)) return baselineScaleCache.get(nearest.prefecture);
+
+  const factors = nearest.entry.monthly_ghi_kwh_m2_day.map((baselineDaily, monthIndex) => {
+    const clearSkyDaily = clearSkyDailyKwhForMonth(nearest.entry.lat, nearest.entry.lon, monthIndex);
+    if (!(baselineDaily > 0) || !(clearSkyDaily > 0)) return 1;
+    const ratio = baselineDaily / clearSkyDaily;
+    return Math.max(BASELINE_SCALE_MIN, Math.min(BASELINE_SCALE_MAX, ratio));
+  });
+  baselineScaleCache.set(nearest.prefecture, factors);
+  return factors;
+}
+
+function baselineScaleForHour(jstHour, factors) {
+  if (!factors) return 1;
+  const monthIndex = Number(jstHour.slice(5, 7)) - 1;
+  const factor = factors[monthIndex];
+  return Number.isFinite(factor) ? factor : 1;
+}
+
 // yr.no compact エンドポイントから cloud_area_fraction を取得
-async function fetchYrCloudHourly(lat, lon, cachedHeaders) {
+async function fetchYrCloudHourly(lat, lon, cachedHourly) {
   const url = `${YR_URL}?lat=${lat.toFixed(4)}&lon=${lon.toFixed(4)}`;
   const headers = { "Accept": "application/json" };
-  if (cachedHeaders?.lastModified) headers["If-Modified-Since"] = cachedHeaders.lastModified;
+  if (hasUsableHourly(cachedHourly) && cachedHourly.lastModified) {
+    headers["If-Modified-Since"] = cachedHourly.lastModified;
+  }
   const res = await fetch(url, { headers });
   if (res.status === 304) return { notModified: true };
   if (!res.ok) throw new Error(`yr.no ${res.status}`);
@@ -671,6 +741,7 @@ async function fetchYrCloudHourly(lat, lon, cachedHeaders) {
 // yr.no の生 hourly (UTC, 不規則間隔) を JST 0時始まり 1時間刻みに揃え、ClearSky と合成。
 function synthesizeHourly(lat, lon, yrTimes, yrCloud) {
   const cs = buildClearSkyHourly(lat, lon);
+  const baselineScales = baselineScaleFactorsForPoint(lat, lon);
   const cloudByJstHour = new Map();
   for (let i = 0; i < yrTimes.length; i += 1) {
     const h = utcIsoToJstHourString(yrTimes[i]);
@@ -685,32 +756,31 @@ function synthesizeHourly(lat, lon, yrTimes, yrCloud) {
     const ccVal = Number.isFinite(cc) ? cc : lastCloud;
     if (Number.isFinite(cc)) lastCloud = cc;
     cloud[i] = ccVal;
-    const ghi = window.Solar.applyCloudCorrection(cs.clearGhi[i], ccVal);
+    const baselineScale = baselineScaleForHour(times[i], baselineScales);
+    const ghi = window.Solar.applyCloudCorrection(cs.clearGhi[i] * baselineScale, ccVal);
     gti[i] = window.Solar.ghiToGti(ghi, lat, TILT_DEG);
   }
   return { times, gti, cloud };
 }
 
-async function fetchHybridForCoords(coords, onProgress) {
+async function fetchHybridForCoords(coords, onProgress, cachedHourlyArr = []) {
   const results = new Array(coords.length);
-  const cacheRaw = (() => {
-    try { return JSON.parse(localStorage.getItem("yr_last_modified_v1") || "{}"); }
-    catch { return {}; }
-  })();
-  const newCacheRaw = { ...cacheRaw };
   let okCount = 0;
   let notModCount = 0;
   for (let i = 0; i < coords.length; i += 1) {
     const c = coords[i];
     const key = `${c.lat.toFixed(3)},${c.lon.toFixed(3)}`;
+    const cachedHourly = cachedHourlyArr[i];
     try {
-      const r = await fetchYrCloudHourly(c.lat, c.lon, { lastModified: cacheRaw[key] });
+      const r = await fetchYrCloudHourly(c.lat, c.lon, cachedHourly);
       if (r.notModified) {
-        results[i] = null;
+        if (!hasUsableHourly(cachedHourly)) throw new Error("yr.no 304 without cached hourly");
+        results[i] = { ...cachedHourly };
         notModCount += 1;
       } else {
-        results[i] = synthesizeHourly(c.lat, c.lon, r.times, r.cloud);
-        if (r.lastModified) newCacheRaw[key] = r.lastModified;
+        const hourly = synthesizeHourly(c.lat, c.lon, r.times, r.cloud);
+        if (r.lastModified) hourly.lastModified = r.lastModified;
+        results[i] = hourly;
         okCount += 1;
       }
     } catch (e) {
@@ -722,7 +792,6 @@ async function fetchHybridForCoords(coords, onProgress) {
       await new Promise((r) => setTimeout(r, YR_REQUEST_INTERVAL_MS));
     }
   }
-  try { localStorage.setItem("yr_last_modified_v1", JSON.stringify(newCacheRaw)); } catch {}
   return results;
 }
 
@@ -780,10 +849,10 @@ async function fetchHourlyForCoords(coords) {
   throw new Error(`Open-Meteo ${res.status}`);
 }
 
-async function fetchForecastForGrid(gridPoints, onProgress) {
+async function fetchForecastForGrid(gridPoints, onProgress, cachedHourlyArr = []) {
   if (FORECAST_SOURCE === "hybrid") {
     const result = new Map();
-    const hourlyArr = await fetchHybridForCoords(gridPoints, onProgress);
+    const hourlyArr = await fetchHybridForCoords(gridPoints, onProgress, cachedHourlyArr);
     hourlyArr.forEach((hourly, idx) => {
       const pt = gridPoints[idx];
       if (hourly) result.set(gridKey(pt.lat, pt.lon), hourly);
@@ -835,12 +904,12 @@ const FACILITY_CACHE_KEY = FORECAST_SOURCE === "hybrid" ? "facility_forecast_hyb
 const PREF_CACHE_KEY = FORECAST_SOURCE === "hybrid" ? "pref_forecast_hybrid_v1" : "pref_forecast_v2";
 const FORECAST_CACHE_TTL_MS = FORECAST_SOURCE === "hybrid" ? HYBRID_CACHE_TTL_MS : 6 * 60 * 60 * 1000;
 
-function readGridCache(key) {
+function readGridCache(key, { ignoreTtl = false } = {}) {
   try {
     const raw = localStorage.getItem(key);
     if (!raw) return null;
     const obj = JSON.parse(raw);
-    if (!obj.savedAt || Date.now() - obj.savedAt > FORECAST_CACHE_TTL_MS) return null;
+    if (!ignoreTtl && (!obj.savedAt || Date.now() - obj.savedAt > FORECAST_CACHE_TTL_MS)) return null;
     const map = new Map();
     for (const [k, v] of Object.entries(obj.points)) map.set(k, v);
     return { step: obj.step, gridForecast: map, savedAt: obj.savedAt };
@@ -879,6 +948,7 @@ async function refreshFacilityForecast({ force = false } = {}) {
 
   if (statusEl) statusEl.textContent = "施設予測取得中…";
   try {
+    const expiredCache = readGridCache(FACILITY_CACHE_KEY, { ignoreTtl: true });
     let step = FORECAST_GRID_STEP;
     assignFacilityGrid(facilitiesCache, step);
     let gridPoints = buildForecastGridPoints(facilitiesCache);
@@ -892,7 +962,10 @@ async function refreshFacilityForecast({ force = false } = {}) {
     const onProgress = (done, total) => {
       if (statusEl) statusEl.textContent = `施設予測取得中… ${done}/${total}`;
     };
-    const gridForecast = await fetchForecastForGrid(gridPoints, onProgress);
+    const cachedHourlyArr = expiredCache?.step === step
+      ? gridPoints.map((pt) => expiredCache.gridForecast.get(gridKey(pt.lat, pt.lon)))
+      : [];
+    const gridForecast = await fetchForecastForGrid(gridPoints, onProgress, cachedHourlyArr);
     facilityGridForecastCache = gridForecast;
     applyFacilityForecast(facilitiesCache, gridForecast, currentHorizon);
     updateFacilityMarkers(facilitiesCache);
@@ -926,12 +999,14 @@ async function refreshPrefectureForecast({ force = false } = {}) {
   if (statusEl) statusEl.textContent = "予測取得中…";
   try {
     const coords = prefRowsCache.map((p) => ({ lat: p.latitude, lon: p.longitude }));
+    const expiredCache = readGridCache(PREF_CACHE_KEY, { ignoreTtl: true });
     let hourlyArr;
     if (FORECAST_SOURCE === "hybrid") {
       const onProgress = (done, total) => {
         if (statusEl) statusEl.textContent = `予測取得中… ${done}/${total}`;
       };
-      hourlyArr = await fetchHybridForCoords(coords, onProgress);
+      const cachedHourlyArr = prefRowsCache.map((p) => expiredCache?.gridForecast.get(p.prefecture));
+      hourlyArr = await fetchHybridForCoords(coords, onProgress, cachedHourlyArr);
     } else {
       hourlyArr = await fetchHourlyForCoords(coords);
     }

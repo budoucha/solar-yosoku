@@ -136,6 +136,7 @@ python scripts/build_baseline_ghi.py
 ```text
 推定 GHI [W/m²]
   = ClearSkyGHI(lat, lon, t)           ← Haurwitz クリアスカイモデル
+    × NASA月別平年GHI / ClearSky月平均GHI
     × (1 − 0.75 × (CC/100)^3.4)        ← Kasten-Czeplak 雲量補正
 推定 GTI [W/m²] ≈ GHI × cos(|lat| − 30°)
 推定発電量 [kWh] = 容量[kW] × PR × GTI 積算[kWh/m²]
@@ -146,7 +147,7 @@ python scripts/build_baseline_ghi.py
 
 ## 現時点の制約 / 既知の課題
 
-- **CF が実機より高め (~29%)**: Haurwitz クリアスカイ式が夏至付近の中緯度で過大評価する既知特性。実発電量で `performance_ratio` を地域別・季節別に校正するのが王道
+- **CF は概算**: NASA POWER 平年値で月別の地域差・季節差を補正しているが、実発電量で `performance_ratio` を地域別・季節別に校正する余地がある
 - **パネル幾何は全国一律決め打ち**。施設別の真値は FIT データに含まれないため
 - **初回ロード約 30 秒**: yr.no がバッチ非対応のため逐次取得。progressive 表示で UX を補完
 - **yr.no は非商用前提** (NLOD)。商用デプロイ時は Open-Meteo Commercial 等への切替を想定
