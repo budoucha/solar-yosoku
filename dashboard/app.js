@@ -155,7 +155,10 @@ function aggregateHourly(hourly, horizon) {
   const times = hourly?.times || [];
   const gti = hourly?.gti || [];
   const cloud = hourly?.cloud || [];
-  if (!times.length) return { gtiKwhM2: 0, cloudPct: NaN, gtiNowWm2: NaN, mode: horizon };
+  const derate = hourly?.derate || [];
+  if (!times.length) {
+    return { gtiKwhM2: 0, deratedGtiKwhM2: 0, cloudPct: NaN, gtiNowWm2: NaN, derateNow: 1, mode: horizon };
+  }
 
   if (horizon === "now") {
     const nowPrefix = jstNowHourIso();
@@ -168,19 +171,24 @@ function aggregateHourly(hourly, horizon) {
     const gtiW = Math.max(0, gti[idx] ?? 0);
     return {
       gtiKwhM2: gtiW / 1000,
+      deratedGtiKwhM2: NaN,
       cloudPct: Number.isFinite(cloud[idx]) ? cloud[idx] : NaN,
       gtiNowWm2: gtiW,
+      derateNow: Number.isFinite(derate[idx]) ? derate[idx] : 1,
       mode: "now",
     };
   }
 
   const target = horizon === "tomorrow" ? jstTomorrow() : jstToday();
   let gtiSum = 0;
+  let deratedGtiSum = 0;
   let cloudSum = 0;
   let cloudN = 0;
   for (let i = 0; i < times.length; i += 1) {
     if (!times[i].startsWith(target)) continue;
-    gtiSum += Math.max(0, gti[i] ?? 0) / 1000;
+    const gtiW = Math.max(0, gti[i] ?? 0);
+    gtiSum += gtiW / 1000;
+    deratedGtiSum += (gtiW * (Number.isFinite(derate[i]) ? derate[i] : 1)) / 1000;
     if (Number.isFinite(cloud[i])) {
       cloudSum += cloud[i];
       cloudN += 1;
@@ -188,8 +196,10 @@ function aggregateHourly(hourly, horizon) {
   }
   return {
     gtiKwhM2: gtiSum,
+    deratedGtiKwhM2: deratedGtiSum,
     cloudPct: cloudN ? cloudSum / cloudN : NaN,
     gtiNowWm2: NaN,
+    derateNow: 1,
     mode: horizon,
   };
 }
@@ -224,11 +234,11 @@ function buildPrefForecastRows(prefList, horizon) {
     let estimatedMwh = 0;
     let capacityFactor = 0;
     if (horizon === "now") {
-      const kw = pref.capacityKw * PERFORMANCE_RATIO * (agg.gtiNowWm2 / 1000);
+      const kw = pref.capacityKw * PERFORMANCE_RATIO * (agg.gtiNowWm2 / 1000) * agg.derateNow;
       estimatedMwh = kw / 1000;
       capacityFactor = capacityMw > 0 ? estimatedMwh / capacityMw : 0;
     } else {
-      estimatedMwh = (pref.capacityKw * PERFORMANCE_RATIO * agg.gtiKwhM2) / 1000;
+      estimatedMwh = (pref.capacityKw * PERFORMANCE_RATIO * agg.deratedGtiKwhM2) / 1000;
       capacityFactor = capacityMw > 0 ? estimatedMwh / (capacityMw * 24) : 0;
     }
     out.push({
@@ -724,43 +734,54 @@ async function fetchYrCloudHourly(lat, lon, cachedHourly) {
   const series = data.properties?.timeseries || [];
   const times = [];
   const cloud = [];
+  const temp = [];
   for (const s of series) {
     const cc = s.data?.instant?.details?.cloud_area_fraction;
     if (cc == null) continue;
     times.push(s.time);
     cloud.push(cc);
+    temp.push(s.data?.instant?.details?.air_temperature ?? null);
   }
   return {
     notModified: false,
     times,
     cloud,
+    temp,
     lastModified: res.headers.get("last-modified") || "",
   };
 }
 
 // yr.no の生 hourly (UTC, 不規則間隔) を JST 0時始まり 1時間刻みに揃え、ClearSky と合成。
-function synthesizeHourly(lat, lon, yrTimes, yrCloud) {
+function synthesizeHourly(lat, lon, yrTimes, yrCloud, yrTemp) {
   const cs = buildClearSkyHourly(lat, lon);
   const baselineScales = baselineScaleFactorsForPoint(lat, lon);
   const cloudByJstHour = new Map();
+  const tempByJstHour = new Map();
   for (let i = 0; i < yrTimes.length; i += 1) {
     const h = utcIsoToJstHourString(yrTimes[i]);
     if (!cloudByJstHour.has(h)) cloudByJstHour.set(h, yrCloud[i]);
+    if (!tempByJstHour.has(h) && Number.isFinite(yrTemp?.[i])) tempByJstHour.set(h, yrTemp[i]);
   }
   const times = cs.times;
   const cloud = new Array(times.length);
   const gti = new Array(times.length);
+  const derate = new Array(times.length);
   let lastCloud = 0;
+  let lastTemp = 15; // 観測なし時のフォールバック (日本の年平均気温近辺)
   for (let i = 0; i < times.length; i += 1) {
     const cc = cloudByJstHour.get(times[i]);
     const ccVal = Number.isFinite(cc) ? cc : lastCloud;
     if (Number.isFinite(cc)) lastCloud = cc;
     cloud[i] = ccVal;
+    const tt = tempByJstHour.get(times[i]);
+    const tVal = Number.isFinite(tt) ? tt : lastTemp;
+    if (Number.isFinite(tt)) lastTemp = tVal;
     const baselineScale = baselineScaleForHour(times[i], baselineScales);
     const ghi = window.Solar.applyCloudCorrection(cs.clearGhi[i] * baselineScale, ccVal);
     gti[i] = window.Solar.ghiToGti(ghi, lat, TILT_DEG);
+    derate[i] = window.Solar.temperatureDerate(tVal, gti[i]);
   }
-  return { times, gti, cloud };
+  return { times, gti, cloud, derate };
 }
 
 async function fetchHybridForCoords(coords, onProgress, cachedHourlyArr = []) {
@@ -778,7 +799,7 @@ async function fetchHybridForCoords(coords, onProgress, cachedHourlyArr = []) {
         results[i] = { ...cachedHourly };
         notModCount += 1;
       } else {
-        const hourly = synthesizeHourly(c.lat, c.lon, r.times, r.cloud);
+        const hourly = synthesizeHourly(c.lat, c.lon, r.times, r.cloud, r.temp);
         if (r.lastModified) hourly.lastModified = r.lastModified;
         results[i] = hourly;
         okCount += 1;
@@ -889,11 +910,11 @@ function applyFacilityForecast(facilities, gridForecast, horizon) {
     f.gtiKwhM2 = agg.gtiKwhM2;
     f.cloudPct = agg.cloudPct;
     if (horizon === "now") {
-      const kw = f.capacityKw * PERFORMANCE_RATIO * (agg.gtiNowWm2 / 1000);
+      const kw = f.capacityKw * PERFORMANCE_RATIO * (agg.gtiNowWm2 / 1000) * agg.derateNow;
       f.estimatedMwh = kw / 1000;
       f.capacityFactor = f.capacityKw > 0 ? kw / f.capacityKw : 0;
     } else {
-      const kwh = f.capacityKw * PERFORMANCE_RATIO * agg.gtiKwhM2;
+      const kwh = f.capacityKw * PERFORMANCE_RATIO * agg.deratedGtiKwhM2;
       f.estimatedMwh = kwh / 1000;
       f.capacityFactor = f.capacityKw > 0 ? kwh / (f.capacityKw * 24) : 0;
     }

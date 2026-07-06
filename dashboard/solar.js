@@ -76,6 +76,18 @@
     return ghi * Math.max(0.5, f); // f が小さくなりすぎないよう下限
   }
 
+  // モジュール温度 [℃] - NOCT モデル (結晶シリコン一般値 NOCT=45℃)
+  function cellTemperature(ambientC, poaWm2, noct = 45) {
+    return ambientC + ((noct - 20) / 800) * Math.max(0, poaWm2);
+  }
+
+  // 温度による出力比率 (STC 25℃基準、gamma≈-0.4%/℃)。poaWm2<=0 なら 1 を返す
+  function temperatureDerate(ambientC, poaWm2, gamma = -0.004) {
+    if (!Number.isFinite(ambientC) || !(poaWm2 > 0)) return 1;
+    const tCell = cellTemperature(ambientC, poaWm2, 45);
+    return 1 + gamma * (tCell - 25);
+  }
+
   window.Solar = {
     solarAltitude,
     solarDeclination,
@@ -84,6 +96,8 @@
     clearSkyHourly,
     applyCloudCorrection,
     ghiToGti,
+    cellTemperature,
+    temperatureDerate,
     dayOfYearUtc,
   };
 })();

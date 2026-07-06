@@ -31,7 +31,7 @@
 - **必須ヘッダ**: User-Agent に連絡先（ブラウザでは自動付与に依存。フォールバック用に Sitename ヘッダ）
 - **レート**: 公式キャップ非公開、ガイドは "be sensible / cache aggressively"
 - **キャッシュ戦略**: 合成済み hourly と `Last-Modified` を同じ localStorage エントリに保持し、再取得時に 304 が返ってきたら旧 hourly の `savedAt` を更新して延命
-- **取得値**: `properties.timeseries[].data.instant.details.cloud_area_fraction` [%]
+- **取得値**: `properties.timeseries[].data.instant.details.cloud_area_fraction` [%], `air_temperature` [℃]（モジュール温度補正用、追加リクエスト不要で同時取得）
 
 #### 本ダッシュボードでの運用
 
@@ -53,7 +53,8 @@ ClearSky_GHI(lat, lon, t)       ← ②
   × (1 - 0.75 × (CC/100)^3.4)   ← ③ (Kasten-Czeplak 非線形)
   → 推定 GHI [W/m²]
   → GTI ≈ GHI × cos(|lat| - 30°)
-  → 発電量 = 容量 × PR × GTI 積算
+  → 温度補正 = 1 + γ×(T_cell - 25℃)  ← ③ air_temperature + NOCT モデル (T_cell = T_air + (45-20)/800×GTI, γ=-0.4%/℃)
+  → 発電量 = 容量 × PR × GTI 積算 × 温度補正
 ```
 
 ---
