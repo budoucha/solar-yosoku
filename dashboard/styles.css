@@ -80,12 +80,9 @@ h3 {
 
 .source-badge {
   flex: 0 0 auto;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  padding: 8px 10px;
   color: var(--muted);
-  background: #f9fbfa;
-  font-size: 13px;
+  font-size: 12px;
+  line-height: 1.3;
   white-space: nowrap;
 }
 
@@ -491,7 +488,9 @@ th {
   .topbar {
     align-items: flex-start;
     flex-direction: column;
-    padding: 16px;
+    gap: 6px;
+    min-height: auto;
+    padding: 12px 16px;
   }
 
   h1 {
@@ -499,7 +498,7 @@ th {
   }
 
   .source-badge {
-    width: 100%;
+    white-space: normal;
   }
 
   .metric-grid {
