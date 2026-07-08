@@ -1,4 +1,4 @@
-const DATASETS = {
+﻿const DATASETS = {
   capacity: "../data/output/capacity_by_prefecture.csv",
   points: "../data/prefecture_points.csv",
   japan: "./japan.topojson",
@@ -28,6 +28,14 @@ const AZIMUTH_DEG = 0.0;
 const FORECAST_MODEL = "jma_seamless";
 const BASELINE_SCALE_MIN = 0.25;
 const BASELINE_SCALE_MAX = 1.25;
+const FACILITY_CAPACITY_THRESHOLDS_MW = [5, 10, 50];
+const DEFAULT_FACILITY_CAPACITY_THRESHOLD_MW = 5;
+
+function setProgress() {}
+function completeProgress() {}
+function failProgress() {}
+function datasetProgressName(path) { return path; }
+
 
 let baselineByPref = null;  // { 県名: { lat, lon, monthly_ghi_kwh_m2_day: [12] } }
 let baselineScaleCache = new Map();
@@ -44,12 +52,14 @@ let forecastMarkerByPref = new Map();
 let hiddenPrefs = new Set();
 let facilityMarkersLayer = null;
 let hiddenFacilities = new Set();
+let currentFacilityCapacityThresholdMw = DEFAULT_FACILITY_CAPACITY_THRESHOLD_MW;
 let prefRowsCache = null;
 let prefForecastRowsCache = [];
 let prefHourlyCache = new Map();
 let facilitiesCache = [];
 let facilityGridForecastCache = new Map();
 let facilityMarkerById = new Map();
+let facilityById = new Map();
 let facilityGridStep = FORECAST_GRID_STEP;
 
 const JAPAN_BOUNDS = [
@@ -115,17 +125,36 @@ function parseCsvLine(line) {
 }
 
 async function loadCsv(path) {
-  const response = await fetch(path, { cache: "no-store" });
-  if (!response.ok) {
-    throw new Error(`${path}: ${response.status}`);
+  const progressName = datasetProgressName(path);
+  setProgress(progressName, "取得中", { path });
+  try {
+    const response = await fetch(path, { cache: "no-store" });
+    if (!response.ok) {
+      throw new Error(`${path}: ${response.status}`);
+    }
+    const rows = parseCsv(await response.text());
+    completeProgress(progressName, { path, rows: rows.length });
+    return rows;
+  } catch (error) {
+    failProgress(progressName, error, { path });
+    throw error;
   }
-  return parseCsv(await response.text());
 }
 
 async function loadJson(path) {
-  const response = await fetch(path, { cache: "no-store" });
-  if (!response.ok) throw new Error(`${path}: ${response.status}`);
-  return response.json();
+  const progressName = datasetProgressName(path);
+  setProgress(progressName, "取得中", { path });
+  try {
+    const response = await fetch(path, { cache: "no-store" });
+    if (!response.ok) throw new Error(`${path}: ${response.status}`);
+    const data = await response.json();
+    const entries = Array.isArray(data) ? data.length : Object.keys(data || {}).length;
+    completeProgress(progressName, { path, entries });
+    return data;
+  } catch (error) {
+    failProgress(progressName, error, { path });
+    throw error;
+  }
 }
 
 function toNumber(value, fallback = 0) {
@@ -210,6 +239,7 @@ function aggregateHourly(hourly, horizon) {
 }
 
 function buildPrefRows(pointRows, capacityRows) {
+  setProgress("都道府県行算出", "算出中", { points: pointRows.length, capacityRows: capacityRows.length });
   const capById = new Map(capacityRows.map((r) => [r.prefecture, r]));
   const list = [];
   for (const p of pointRows) {
@@ -227,10 +257,12 @@ function buildPrefRows(pointRows, capacityRows) {
       city: p.city || "",
     });
   }
+  completeProgress("都道府県行算出", { rows: list.length });
   return list;
 }
 
 function buildPrefForecastRows(prefList, horizon) {
+  setProgress("都道府県予測算出", "算出中", { rows: prefList.length, horizon });
   const out = [];
   for (const pref of prefList) {
     const hourly = prefHourlyCache.get(pref.prefecture);
@@ -261,6 +293,8 @@ function buildPrefForecastRows(prefList, horizon) {
       horizon,
     });
   }
+  const available = out.filter((row) => row.estimatedMwh > 0 || Number.isFinite(row.cloudCoverPct)).length;
+  completeProgress("都道府県予測算出", { rows: out.length, available, horizon });
   return out;
 }
 
@@ -312,6 +346,7 @@ function metricCfLabel(horizon) {
 }
 
 function renderSummary(rows) {
+  setProgress("サマリー算出", "算出中", { rows: rows.length, horizon: currentHorizon });
   const totalCapacityMw = rows.reduce((sum, row) => sum + row.capacityMw, 0);
   const maxCapacityFactor = Math.max(...rows.map((row) => row.capacityFactor), 0);
   const date = rows.find((row) => row.date)?.date || "容量データ";
@@ -328,8 +363,15 @@ function renderSummary(rows) {
   const cfLabelEl = document.querySelector("#metric-capacity-factor-label");
   if (cfLabelEl) cfLabelEl.textContent = metricCfLabel(currentHorizon);
   document.querySelector("#metric-capacity-factor").textContent = percentFormat.format(maxCapacityFactor);
+  completeProgress("サマリー算出", {
+    horizon: currentHorizon,
+    rows: rows.length,
+    facilities: facilityCount,
+    capacityMw: oneDecimalFormat.format(totalCapacityMw),
+    generation: metricGenerationText(rows, currentHorizon),
+    maxCapacityFactor: percentFormat.format(maxCapacityFactor),
+  });
 }
-
 
 function escapeHtml(value) {
   return String(value ?? "").replace(/[&<>"']/g, (char) => ({
@@ -406,6 +448,7 @@ function renderPrefectureTable(rows) {
       const facilityCb = e.target.closest("input.facility-toggle");
       if (facilityCb) {
         setFacilityVisible(facilityCb.dataset.facilityKey, facilityCb.checked);
+        syncFacilitiesMasterCheckbox(facilitiesForSelectedClass());
       }
     });
     table.dataset.toggleBound = "1";
@@ -429,9 +472,9 @@ function renderFacilityTable(facilities) {
   `;
   const master = document.querySelector("#facilities-master");
   if (master) {
-    master.checked = hiddenFacilities.size === 0;
+    syncFacilitiesMasterCheckbox(facilities);
     master.addEventListener("change", (e) => {
-      setAllFacilitiesVisible(e.target.checked);
+      setFacilitiesVisible(facilities, e.target.checked);
     });
   }
 
@@ -440,11 +483,16 @@ function renderFacilityTable(facilities) {
     const tr = document.createElement("tr");
     const key = facilityKey(facility);
     const checked = hiddenFacilities.has(key) ? "" : "checked";
-    const id = facility.facilityId ? `FIT ID ${facility.facilityId}` : "FIT ID -";
-    const detail = [id, facility.address || facility.matchedAddress].filter(Boolean).join(" / ");
+    const owner = facility.owner || facility.operator;
+    const detail = [
+      facilityIdLabel(facility),
+      owner,
+      facilitySourceLabel(facility),
+      facility.address || facility.matchedAddress,
+    ].filter(Boolean).join(" / ");
     tr.innerHTML = `
       <td class="toggle-col"><input type="checkbox" class="facility-toggle" data-facility-key="${escapeHtml(key)}" ${checked}></td>
-      <td class="site-col"><div class="site-name">${escapeHtml(facility.prefecture)}<span>${escapeHtml(detail)}</span></div></td>
+      <td class="site-col"><div class="site-name">${escapeHtml(facilityDisplayName(facility))}<span>${escapeHtml(detail)}</span></div></td>
       <td class="metric-col">${numberFormat.format(facility.capacityMw)} MW</td>
       <td class="metric-col">${rowGenerationText(facility)}</td>
       <td class="metric-col">${rowCapacityFactorText(facility)}</td>
@@ -456,9 +504,10 @@ function renderFacilityTable(facilities) {
 function renderActiveList() {
   updateListChrome(currentListMode);
   if (currentListMode === "facility") {
-    renderFacilityTable(facilitiesCache);
+    const facilities = facilitiesForSelectedClass();
+    renderFacilityTable(facilities);
     document.querySelector("#data-status").textContent =
-      `${numberFormat.format(facilitiesCache.length)}施設`;
+      `${numberFormat.format(facilities.length)} / ${numberFormat.format(facilitiesCache.length)}施設 (${currentFacilityCapacityThresholdMw}MW以上)`;
     return;
   }
 
@@ -469,6 +518,7 @@ function renderActiveList() {
   document.querySelector("#data-status").textContent =
     `${prefCount}県 / ${numberFormat.format(facilityCount)}施設`;
 }
+
 function snapToGrid(value, step) {
   return Math.round(value / step) * step;
 }
@@ -478,12 +528,20 @@ function gridKey(lat, lon) {
 }
 
 function buildFacilities(facilityRows) {
-  return facilityRows
+  setProgress("施設行算出", "算出中", { rows: facilityRows.length });
+  const facilities = facilityRows
     .map((row) => {
       const lat = toNumber(row.latitude, NaN);
       const lon = toNumber(row.longitude, NaN);
       return {
         facilityId: row.facility_id || "",
+        facilityName: row.facility_name || "",
+        operator: row.operator || "",
+        owner: row.owner || "",
+        sourceType: row.source_type || "fit",
+        source: row.source || "",
+        sourceUrl: row.source_url || "",
+        sourceFile: row.source_file || "",
         prefecture: row.prefecture || "",
         address: row.address || "",
         matchedAddress: row.matched_address || "",
@@ -498,6 +556,8 @@ function buildFacilities(facilityRows) {
       };
     })
     .filter((f) => Number.isFinite(f.latitude) && Number.isFinite(f.longitude) && f.capacityMw > 0);
+  completeProgress("施設行算出", { rows: facilities.length });
+  return facilities;
 }
 
 function assignFacilityGrid(facilities, step) {
@@ -530,12 +590,27 @@ function facilityRateColor(rate) {
   return lerpColor("#22c55e", "#ea580c", (t - 0.5) * 2);
 }
 
+function facilityDisplayName(f) {
+  return f.facilityName || f.address || f.matchedAddress || f.prefecture || "名称未設定施設";
+}
+
+function facilityIdLabel(f) {
+  if (!f.facilityId) return "";
+  return f.sourceType === "fit" ? `FIT ID ${f.facilityId}` : `ID ${f.facilityId}`;
+}
+
+function facilitySourceLabel(f) {
+  if (f.source) return f.source;
+  if (f.sourceType === "fit") return "FIT/FIP publicinfo";
+  return f.sourceFile || "外部施設";
+}
+
 function facilityTooltipHtml(f) {
   const rateTxt = Number.isFinite(f.capacityFactor) ? percentFormat.format(f.capacityFactor) : "予測待ち";
   const label = currentHorizon === "now" ? "出力率" : "発電率";
-  return `<div class="tooltip-pref">${f.prefecture}</div>
+  return `<div class="tooltip-pref">${escapeHtml(facilityDisplayName(f))}</div>
        <div class="tooltip-val">${oneDecimalFormat.format(f.capacityMw)} MW / ${label} ${rateTxt}</div>
-       <div class="tooltip-sub">${f.address}</div>`;
+       <div class="tooltip-sub">${escapeHtml([f.prefecture, facilitySourceLabel(f)].filter(Boolean).join(" / "))}</div>`;
 }
 
 function facilityPopupHtml(f) {
@@ -548,21 +623,92 @@ function facilityPopupHtml(f) {
   const generationLabel = currentHorizon === "now" ? "推定出力" : "推定発電量";
   const rateLabel = currentHorizon === "now" ? "出力率" : "発電率";
   const gtiTxt = Number.isFinite(f.gtiKwhM2) ? oneDecimalFormat.format(f.gtiKwhM2) + " kWh/m²" : "-";
+  const sourceUrl = f.sourceUrl
+    ? `<dt>出典URL</dt><dd><a href="${escapeHtml(f.sourceUrl)}" target="_blank" rel="noopener noreferrer">${escapeHtml(f.sourceUrl)}</a></dd>`
+    : "";
   return `
-      <div class="popup-title">${f.prefecture}<span>FIT ID ${f.facilityId}</span></div>
+      <div class="popup-title">${escapeHtml(facilityDisplayName(f))}<span>${escapeHtml(facilityIdLabel(f) || facilitySourceLabel(f))}</span></div>
       <dl class="popup-grid">
         <dt>設備容量</dt><dd>${oneDecimalFormat.format(f.capacityMw)} MW</dd>
         <dt>${generationLabel}</dt><dd>${generationTxt}</dd>
         <dt>${rateLabel}</dt><dd>${rateTxt}</dd>
         <dt>代表 GTI</dt><dd>${gtiTxt}</dd>
-        <dt>住所</dt><dd>${f.address}</dd>
+        <dt>都道府県</dt><dd>${escapeHtml(f.prefecture)}</dd>
+        <dt>所有者</dt><dd>${escapeHtml(f.owner || "-")}</dd>
+        <dt>事業者</dt><dd>${escapeHtml(f.operator || "-")}</dd>
+        <dt>出典</dt><dd>${escapeHtml(facilitySourceLabel(f))}</dd>
+        ${sourceUrl}
+        <dt>住所</dt><dd>${escapeHtml(f.address || f.matchedAddress || "-")}</dd>
         <dt>座標</dt><dd>${f.latitude.toFixed(4)}, ${f.longitude.toFixed(4)}</dd>
       </dl>
     `;
 }
 
 function facilityKey(f) {
-  return f.facilityId || `${f.latitude},${f.longitude}`;
+  if (f.facilityId) return `${f.sourceType}:${f.facilityId}`;
+  return `${f.sourceType}:${facilityDisplayName(f)}:${f.latitude},${f.longitude}`;
+}
+
+function facilityClassLabel(thresholdMw) {
+  return `個別施設 (${thresholdMw}MW以上)`;
+}
+
+function facilityMatchesSelectedClass(f) {
+  return f.capacityMw >= currentFacilityCapacityThresholdMw;
+}
+
+function facilitiesForSelectedClass() {
+  return facilitiesCache.filter(facilityMatchesSelectedClass);
+}
+
+function renderFacilityLayer() {
+  if (!facilityMarkersLayer) return;
+  facilityMarkersLayer.clearLayers();
+  for (const [key, marker] of facilityMarkerById) {
+    const facility = facilityById.get(key);
+    if (!facility || hiddenFacilities.has(key) || !facilityMatchesSelectedClass(facility)) continue;
+    if (currentListMode === "prefecture" && hiddenPrefs.has(facility.prefecture)) continue;
+    facilityMarkersLayer.addLayer(marker);
+  }
+}
+
+function setFacilityCapacityThreshold(thresholdMw) {
+  if (!FACILITY_CAPACITY_THRESHOLDS_MW.includes(thresholdMw)) return;
+  currentFacilityCapacityThresholdMw = thresholdMw;
+  renderFacilityLayer();
+  if (currentListMode === "facility") renderActiveList();
+}
+
+function addFacilityClassControl(layerControl) {
+  const overlays = layerControl.getContainer()?.querySelector(".leaflet-control-layers-overlays");
+  if (!overlays) return;
+
+  const group = document.createElement("div");
+  group.className = "leaflet-control-layers-facility-classes";
+
+  for (const thresholdMw of FACILITY_CAPACITY_THRESHOLDS_MW) {
+    const label = document.createElement("label");
+    const span = document.createElement("span");
+    const input = document.createElement("input");
+    const text = document.createElement("span");
+
+    input.type = "radio";
+    input.name = "facility-capacity-threshold";
+    input.value = String(thresholdMw);
+    input.checked = thresholdMw === currentFacilityCapacityThresholdMw;
+    input.className = "leaflet-control-layers-selector facility-class-radio";
+    input.addEventListener("change", (e) => {
+      if (!e.target.checked) return;
+      setFacilityCapacityThreshold(Number(e.target.value));
+    });
+
+    text.textContent = ` ${facilityClassLabel(thresholdMw)}`;
+    span.append(input, text);
+    label.append(span);
+    group.append(label);
+  }
+
+  overlays.append(group);
 }
 
 function addFacilityLayer(map, facilities) {
@@ -571,9 +717,11 @@ function addFacilityLayer(map, facilities) {
   facilityMarkersLayer = layer;
   const maxMw = Math.max(...facilities.map((f) => f.capacityMw));
   facilityMarkerById.clear();
+  facilityById.clear();
 
   for (const f of facilities) {
     const m = L.circleMarker([f.latitude, f.longitude], {
+      pane: "facilityMarkerPane",
       radius: facilityRadius(f.capacityMw, maxMw),
       color: "#1f2937",
       weight: 0.8,
@@ -583,11 +731,12 @@ function addFacilityLayer(map, facilities) {
     m.bindTooltip(facilityTooltipHtml(f), { direction: "top", offset: [0, -4], sticky: false });
     m.bindPopup(facilityPopupHtml(f));
     const key = facilityKey(f);
-    if (!hiddenFacilities.has(key)) layer.addLayer(m);
     facilityMarkerById.set(key, m);
+    facilityById.set(key, f);
   }
 
   layer.addTo(map);
+  renderFacilityLayer();
   return layer;
 }
 
@@ -603,6 +752,10 @@ function updateFacilityMarkers(facilities) {
 }
 
 function initMap(japanTopo, facilities) {
+  setProgress("地図初期化", "処理中", {
+    topojson: japanTopo ? "あり" : "なし",
+    facilities: facilities?.length || 0,
+  });
   const map = L.map("map", {
     zoomControl: false,
     minZoom: 4,
@@ -614,10 +767,18 @@ function initMap(japanTopo, facilities) {
   leafletMap = map;
   L.control.zoom({ position: "bottomright" }).addTo(map);
 
+  map.createPane("prefecturePane");
+  map.getPane("prefecturePane").style.zIndex = 390;
+  map.createPane("forecastMarkerPane");
+  map.getPane("forecastMarkerPane").style.zIndex = 450;
+  map.createPane("facilityMarkerPane");
+  map.getPane("facilityMarkerPane").style.zIndex = 460;
+
   if (japanTopo) {
     const objKey = Object.keys(japanTopo.objects)[0];
     const gj = topojson.feature(japanTopo, japanTopo.objects[objKey]);
     prefectureGeoLayer = L.geoJSON(gj, {
+      pane: "prefecturePane",
       style: () => ({
         color: "#8a9fa8",
         weight: 0.6,
@@ -632,13 +793,19 @@ function initMap(japanTopo, facilities) {
 
   forecastMarkersLayer = L.layerGroup();
 
-  const overlays = { "都道府県マーカー": forecastMarkersLayer };
-  if (facilityLayer) overlays["個別施設 (≥5MW)"] = facilityLayer;
-  L.control.layers(null, overlays, { position: "topright", collapsed: false }).addTo(map);
+  const overlays = {
+    "都道府県マーカー": forecastMarkersLayer,
+  };
+  const layerControl = L.control.layers(null, overlays, { position: "topright", collapsed: false }).addTo(map);
+  if (facilityLayer) addFacilityClassControl(layerControl);
 
   requestAnimationFrame(() => {
     map.invalidateSize();
     map.fitBounds(JAPAN_BOUNDS);
+  });
+  completeProgress("地図初期化", {
+    topojson: japanTopo ? "あり" : "なし",
+    facilities: facilities?.length || 0,
   });
 }
 
@@ -667,6 +834,7 @@ function updateForecastMarkers(rows) {
 
   for (const row of rows) {
     const marker = L.circleMarker([row.latitude, row.longitude], {
+      pane: "forecastMarkerPane",
       radius: markerRadius(row.capacityMw, maxCapacityMw),
       color: "#ffffff",
       weight: 2,
@@ -713,6 +881,7 @@ function setPrefVisible(prefecture, visible) {
     hiddenPrefs.add(prefecture);
     if (forecastMarkersLayer.hasLayer(marker)) forecastMarkersLayer.removeLayer(marker);
   }
+  if (currentListMode === "prefecture") renderFacilityLayer();
 }
 
 function setAllPrefsVisible(visible) {
@@ -725,24 +894,36 @@ function setAllPrefsVisible(visible) {
 }
 
 function setFacilityVisible(facilityKeyValue, visible) {
-  const marker = facilityMarkerById.get(facilityKeyValue);
-  if (!marker || !facilityMarkersLayer) return;
   if (visible) {
     hiddenFacilities.delete(facilityKeyValue);
-    if (!facilityMarkersLayer.hasLayer(marker)) facilityMarkersLayer.addLayer(marker);
   } else {
     hiddenFacilities.add(facilityKeyValue);
-    if (facilityMarkersLayer.hasLayer(marker)) facilityMarkersLayer.removeLayer(marker);
   }
+  renderFacilityLayer();
 }
 
-function setAllFacilitiesVisible(visible) {
-  for (const key of facilityMarkerById.keys()) {
-    setFacilityVisible(key, visible);
+function setFacilitiesVisible(facilities, visible) {
+  for (const facility of facilities) {
+    const key = facilityKey(facility);
+    if (visible) {
+      hiddenFacilities.delete(key);
+    } else {
+      hiddenFacilities.add(key);
+    }
   }
+  renderFacilityLayer();
   document.querySelectorAll("#site-table input.facility-toggle").forEach((cb) => {
     cb.checked = visible;
   });
+  syncFacilitiesMasterCheckbox(facilities);
+}
+
+function syncFacilitiesMasterCheckbox(facilities) {
+  const master = document.querySelector("#facilities-master");
+  if (!master) return;
+  const visibleCount = facilities.filter((facility) => !hiddenFacilities.has(facilityKey(facility))).length;
+  master.checked = facilities.length > 0 && visibleCount === facilities.length;
+  master.indeterminate = visibleCount > 0 && visibleCount < facilities.length;
 }
 
 function renderError(error) {
@@ -1035,6 +1216,12 @@ async function fetchForecastForGrid(gridPoints, onProgress, cachedHourlyArr = []
 }
 
 function applyFacilityForecast(facilities, gridForecast, horizon) {
+  setProgress("施設予測算出", "算出中", {
+    facilities: facilities.length,
+    gridPoints: gridForecast.size,
+    horizon,
+  });
+  let available = 0;
   for (const f of facilities) {
     const hourly = gridForecast.get(f.gridKey);
     if (!hourly) {
@@ -1056,7 +1243,24 @@ function applyFacilityForecast(facilities, gridForecast, horizon) {
       f.estimatedMwh = kwh / 1000;
       f.capacityFactor = f.capacityKw > 0 ? kwh / (f.capacityKw * 24) : 0;
     }
+    if (Number.isFinite(f.estimatedMwh)) available += 1;
   }
+  if (!gridForecast.size) {
+    setProgress("施設予測算出", "未算出", {
+      facilities: facilities.length,
+      available,
+      gridPoints: gridForecast.size,
+      horizon,
+      reason: "予測データなし",
+    });
+    return;
+  }
+  completeProgress("施設予測算出", {
+    facilities: facilities.length,
+    available,
+    gridPoints: gridForecast.size,
+    horizon,
+  });
 }
 
 const FACILITY_CACHE_KEY = FORECAST_SOURCE === "hybrid" ? "facility_forecast_hybrid_v1" : "facility_forecast_v2";
@@ -1069,6 +1273,10 @@ function readGridCache(key, { ignoreTtl = false } = {}) {
     if (!raw) return null;
     const obj = JSON.parse(raw);
     if (!ignoreTtl && (!obj.savedAt || Date.now() - obj.savedAt > FORECAST_CACHE_TTL_MS)) return null;
+    if (!obj.points || Object.keys(obj.points).length === 0) {
+      localStorage.removeItem(key);
+      return null;
+    }
     const map = new Map();
     for (const [k, v] of Object.entries(obj.points)) map.set(k, v);
     return { step: obj.step, gridForecast: map, savedAt: obj.savedAt };
@@ -1086,8 +1294,14 @@ function writeGridCache(key, step, gridForecast) {
 }
 
 async function refreshFacilityForecast({ force = false } = {}) {
-  if (!facilitiesCache.length) return;
+  if (!facilitiesCache.length) {
+    setProgress("施設予測取得", "スキップ", { reason: "施設なし" });
+    return;
+  }
   const statusEl = document.querySelector("#facility-status");
+  setProgress("施設予測取得", force ? "再取得準備中" : "キャッシュ確認中", {
+    facilities: facilitiesCache.length,
+  });
 
   if (!force) {
     const cached = readGridCache(FACILITY_CACHE_KEY);
@@ -1102,12 +1316,19 @@ async function refreshFacilityForecast({ force = false } = {}) {
         const ageMin = Math.round((Date.now() - cached.savedAt) / 60000);
         statusEl.textContent = `施設予測 キャッシュ(${ageMin}分前 / ${cached.step}°)`;
       }
+      completeProgress("施設予測取得", {
+        source: "cache",
+        ageMin: Math.round((Date.now() - cached.savedAt) / 60000),
+        gridPoints: cached.gridForecast.size,
+        step: cached.step,
+      });
       return;
     }
   }
 
   if (statusEl) statusEl.textContent = "施設予測取得中…";
   try {
+    setProgress("施設予測取得", "取得準備中", { source: FORECAST_SOURCE });
     const expiredCache = readGridCache(FACILITY_CACHE_KEY, { ignoreTtl: true });
     let step = FORECAST_GRID_STEP;
     assignFacilityGrid(facilitiesCache, step);
@@ -1118,14 +1339,32 @@ async function refreshFacilityForecast({ force = false } = {}) {
       gridPoints = buildForecastGridPoints(facilitiesCache);
     }
     facilityGridStep = step;
+    facilityGridForecastCache = new Map();
     console.log(`[facility forecast] source=${FORECAST_SOURCE} step=${step}° unique grid points=${gridPoints.length}`);
-    const onProgress = (done, total) => {
+    const onProgress = (done, total, okCount = 0, notModCount = 0) => {
       if (statusEl) statusEl.textContent = `施設予測取得中… ${done}/${total}`;
+      setProgress("施設予測取得", "取得中", {
+        source: FORECAST_SOURCE,
+        done,
+        total,
+        okCount,
+        notModCount,
+        step,
+      });
     };
     const cachedHourlyArr = expiredCache?.step === step
       ? gridPoints.map((pt) => expiredCache.gridForecast.get(gridKey(pt.lat, pt.lon)))
       : [];
     const gridForecast = await fetchForecastForGrid(gridPoints, onProgress, cachedHourlyArr);
+    if (!gridForecast.size) {
+      throw new Error(`施設予測データ0件 (${gridPoints.length}格子すべて取得失敗)`);
+    }
+    completeProgress("施設予測取得", {
+      source: FORECAST_SOURCE,
+      gridPoints: gridForecast.size,
+      total: gridPoints.length,
+      step,
+    });
     facilityGridForecastCache = gridForecast;
     applyFacilityForecast(facilitiesCache, gridForecast, currentHorizon);
     updateFacilityMarkers(facilitiesCache);
@@ -1137,12 +1376,19 @@ async function refreshFacilityForecast({ force = false } = {}) {
     }
   } catch (e) {
     if (statusEl) statusEl.textContent = `施設予測失敗: ${e.message}`;
+    failProgress("施設予測取得", e, { source: FORECAST_SOURCE });
   }
 }
 
 async function refreshPrefectureForecast({ force = false } = {}) {
-  if (!prefRowsCache) return;
+  if (!prefRowsCache) {
+    setProgress("都道府県予測取得", "スキップ", { reason: "都道府県行なし" });
+    return;
+  }
   const statusEl = document.querySelector("#forecast-status");
+  setProgress("都道府県予測取得", force ? "再取得準備中" : "キャッシュ確認中", {
+    rows: prefRowsCache.length,
+  });
 
   if (!force) {
     const cached = readGridCache(PREF_CACHE_KEY);
@@ -1153,30 +1399,52 @@ async function refreshPrefectureForecast({ force = false } = {}) {
         const ageMin = Math.round((Date.now() - cached.savedAt) / 60000);
         statusEl.textContent = `予測 キャッシュ(${ageMin}分前)`;
       }
+      completeProgress("都道府県予測取得", {
+        source: "cache",
+        ageMin: Math.round((Date.now() - cached.savedAt) / 60000),
+        rows: cached.gridForecast.size,
+      });
       return;
     }
   }
 
   if (statusEl) statusEl.textContent = "予測取得中…";
   try {
+    setProgress("都道府県予測取得", "取得準備中", { source: FORECAST_SOURCE, rows: prefRowsCache.length });
     const coords = prefRowsCache.map((p) => ({ lat: p.latitude, lon: p.longitude }));
     const expiredCache = readGridCache(PREF_CACHE_KEY, { ignoreTtl: true });
     let hourlyArr;
     if (FORECAST_SOURCE === "hybrid") {
-      const onProgress = (done, total) => {
+      const onProgress = (done, total, okCount = 0, notModCount = 0) => {
         if (statusEl) statusEl.textContent = `予測取得中… ${done}/${total}`;
+        setProgress("都道府県予測取得", "取得中", {
+          source: FORECAST_SOURCE,
+          done,
+          total,
+          okCount,
+          notModCount,
+        });
       };
       const cachedHourlyArr = prefRowsCache.map((p) => expiredCache?.gridForecast.get(p.prefecture));
       hourlyArr = await fetchHybridForCoords(coords, onProgress, cachedHourlyArr);
     } else {
+      setProgress("都道府県予測取得", "取得中", { source: FORECAST_SOURCE, total: coords.length });
       hourlyArr = await fetchHourlyForCoords(coords);
     }
     const gridForecast = new Map();
     prefRowsCache.forEach((p, idx) => {
       if (hourlyArr[idx]) gridForecast.set(p.prefecture, hourlyArr[idx]);
     });
+    if (!gridForecast.size) {
+      throw new Error(`都道府県予測データ0件 (${coords.length}地点すべて取得失敗)`);
+    }
     prefHourlyCache = gridForecast;
     writeGridCache(PREF_CACHE_KEY, 0, gridForecast);
+    completeProgress("都道府県予測取得", {
+      source: FORECAST_SOURCE,
+      rows: gridForecast.size,
+      total: coords.length,
+    });
     renderPrefectureViews();
     if (statusEl) {
       const t = new Date().toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit" });
@@ -1184,6 +1452,7 @@ async function refreshPrefectureForecast({ force = false } = {}) {
     }
   } catch (e) {
     if (statusEl) statusEl.textContent = `予測取得失敗: ${e.message}`;
+    failProgress("都道府県予測取得", e, { source: FORECAST_SOURCE });
   }
 }
 
@@ -1224,6 +1493,7 @@ function bindListModeControl() {
       if (!LIST_MODES.includes(value)) return;
       currentListMode = value;
       renderActiveList();
+      renderFacilityLayer();
     });
   });
 }
