@@ -232,6 +232,48 @@ TTL 6h で 1 日 4 回 ≈ 480 calls。日次 10,000 枠の **約 5%** で収ま
 - **使い方**: 開発環境の Python バッチ（[cli.py](../src/solar_power_forecast/cli.py) の `geocode` サブコマンド）でのみ実行、結果 CSV をコミット
 - **キャッシュ**: `data/output/geocode_cache.csv` で住所→座標を蓄積
 
+#### 住所から座標を推定するフロー
+
+1. **入力を確定する**
+   - 原則として FIT/FIP Excel と、必要に応じて `--extra-facilities` で追加した外部施設CSVから作った `data/output/solar_facilities_detail.csv` を入力にする。
+   - 容量集計と同じく `認定設備` シート由来の行を使う。`すべての設備所在地` シートは同一設備の複数所在地を持ち、容量を足すと多重計上になりやすいので、座標推定の補助確認以外では集計入力にしない。
+   - 通常のダッシュボード向けには `--min-kw 5000` で 5MW 以上だけを地図表示する。1MW 以上のデータは件数が多く表示が重いため、特別な検証環境向けに `data/output/solar_facilities_geocoded_1mw_special.csv` として残す。
+
+2. **既存キャッシュを先に使う**
+   - `data/output/geocode_cache.csv` を読み、同一住所があれば API を呼ばずに `latitude`, `longitude`, `matched_address` を再利用する。
+   - キャッシュは国土地理院 AddressSearch の負荷軽減と再現性確保のため、住所をキーにして追記・重複排除する。
+
+3. **住所候補を段階的に作る**
+   - 元住所を正規化し、空白・改行・全半角ゆれを揃える。
+   - `地内`, `地先`, `他`, `番地`, `大字`, `字`, 長音やハイフンの表記ゆれなど、検索失敗の原因になりやすい表現を落とす。
+   - フル住所で見つからない場合は、番地以下を削った町名相当、さらに都道府県 + 市区町村相当まで段階的に丸める。
+
+4. **国土地理院 AddressSearch に問い合わせる**
+   - Python バッチから `q=<住所候補>` で問い合わせる。ブラウザから直接呼ばない。
+   - 返却 GeoJSON の `geometry.coordinates` は `[longitude, latitude]` なので、CSV には `latitude`, `longitude` の順に格納する。
+   - 最初に見つかった候補の `properties.title` を `matched_address` として残す。これは後段の目視確認・品質判定に使う。
+
+5. **失敗時は推定粒度を下げる**
+   - フル住所が見つからない場合は町名、市区町村の順に粗くする。
+   - それでも見つからない行は座標を空欄にして残す。県代表点や県庁所在地で施設座標を埋めると、施設別予測や地図表示で誤解を招くため避ける。
+   - 手作業で補正した座標を使う場合は、元住所・緯度・経度・照合住所をキャッシュに残し、次回以降の自動処理で再利用する。
+
+6. **品質確認してから成果物にする**
+   - 件数、座標付き件数、未照合件数、施設ID重複数を確認する。
+   - 緯度経度が日本域の概算範囲（緯度 20〜46 度、経度 122〜154 度）から外れていないか確認する。
+   - `matched_address` が元の都道府県と食い違う行、または市区町村までしか一致していない大容量設備は優先的に見直す。
+   - 容量合計はジオコード前後で変えない。座標が見つからない施設を落とす場合は、予測対象容量が減ることを別途記録する。
+
+実行例:
+
+```bash
+python -m solar_power_forecast geocode \
+  --detail data/output/solar_facilities_detail.csv \
+  --out data/output/solar_facilities_geocoded.csv \
+  --min-kw 5000 \
+  --cache data/output/geocode_cache.csv
+```
+
 ### FIT/FIP 公表情報 (`https://www.fit-portal.go.jp/publicinfo`)
 
 施設容量データ。県別 Excel をスクレイプ。

@@ -41,6 +41,7 @@
 │       ├── capacity_by_prefecture.csv
 │       ├── solar_facilities_detail.csv
 │       ├── solar_facilities_geocoded.csv
+│       ├── solar_facilities_geocoded_1mw_special.csv
 │       └── geocode_cache.csv
 ├── scripts/
 │   └── build_baseline_ghi.py             # NASA POWER 平年値取得
@@ -134,6 +135,7 @@ python -m solar_power_forecast geocode \
 ```
 
 `data/output/geocode_cache.csv` に住所→座標がキャッシュされる。
+通常のダッシュボードでは 5MW 以上の `solar_facilities_geocoded.csv` を使う。1MW 以上の `solar_facilities_geocoded_1mw_special.csv` は件数が多く表示が重いため、特別な検証環境でのみ使う。
 
 ### NASA POWER 平年値（年 1 回程度で十分）
 

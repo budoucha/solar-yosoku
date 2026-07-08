@@ -18,7 +18,9 @@ data/*.csv
 !data/sample/*.csv
 # ダッシュボードに必要なものだけ通す
 !data/output/capacity_by_prefecture.csv
+!data/output/solar_facilities_location_capacity.csv
 !data/output/solar_facilities_geocoded.csv
+!data/output/solar_facilities_geocoded_1mw_special.csv
 !data/output/geocode_cache.csv
 
 # ログ
