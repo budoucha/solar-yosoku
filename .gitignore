@@ -23,6 +23,7 @@ data/*.csv
 
 # ログ
 *.log
+memo/
 
 # Local tools
 .tools/
