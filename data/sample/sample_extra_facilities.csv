@@ -1,0 +1,2 @@
+prefecture,facility_name,owner,operator,address,capacity_kw,latitude,longitude,source,source_url,facility_id
+山梨県,サンプル電力 太陽光発電所,サンプル電力株式会社,サンプル電力株式会社,山梨県甲府市,10000,35.6623,138.5683,manual sample,https://example.com/sample,external-sample-001

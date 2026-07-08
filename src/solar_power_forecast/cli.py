@@ -191,6 +191,12 @@ def read_fit_file(path: Path, prefecture: str, min_kw: float, exclude_inactive: 
             "capacity_kw": df["capacity_kw"],
             "sheet": sheet,
             "source_file": path.name,
+            "source_type": "fit",
+            "source": "FIT/FIP publicinfo",
+            "facility_name": "",
+            "operator": "",
+            "owner": "",
+            "source_url": "",
         })
         if id_col is not None:
             out["facility_id"] = df[id_col].map(norm_text)
@@ -201,6 +207,82 @@ def read_fit_file(path: Path, prefecture: str, min_kw: float, exclude_inactive: 
     if not frames:
         return pd.DataFrame(columns=["prefecture", "capacity_kw", "sheet", "source_file"])
     return pd.concat(frames, ignore_index=True)
+
+
+EXTRA_FACILITY_COLUMN_ALIASES = {
+    "prefecture": ["prefecture", "都道府県", "県"],
+    "capacity_kw": ["capacity_kw", "capacity_kW", "容量kw", "容量(kW)", "設備容量kw", "設備容量(kW)", "出力kw", "出力(kW)"],
+    "facility_id": ["facility_id", "id", "施設id", "施設ID", "設備id", "設備ID"],
+    "facility_name": ["facility_name", "name", "施設名", "発電所名", "名称"],
+    "operator": ["operator", "事業者", "発電事業者", "運営者"],
+    "owner": ["owner", "所有者", "保有者"],
+    "address": ["address", "住所", "所在地", "設置場所"],
+    "latitude": ["latitude", "lat", "緯度"],
+    "longitude": ["longitude", "lon", "lng", "経度"],
+    "matched_address": ["matched_address", "照合住所"],
+    "source": ["source", "出典", "情報源"],
+    "source_url": ["source_url", "url", "URL", "出典URL"],
+}
+
+
+def _normalized_column_lookup(columns) -> dict[str, str]:
+    return {norm_text(c).lower(): c for c in columns}
+
+
+def _pick_extra_col(columns, canonical: str) -> str | None:
+    lookup = _normalized_column_lookup(columns)
+    for alias in EXTRA_FACILITY_COLUMN_ALIASES[canonical]:
+        col = lookup.get(norm_text(alias).lower())
+        if col is not None:
+            return col
+    return None
+
+
+def read_extra_facilities(path: Path, min_kw: float) -> pd.DataFrame:
+    """FIT/FIP以外の手入力・外部ソース施設CSVを標準スキーマに揃える。"""
+    df = pd.read_csv(path, dtype=object)
+    pref_col = _pick_extra_col(df.columns, "prefecture")
+    cap_col = _pick_extra_col(df.columns, "capacity_kw")
+    if pref_col is None or cap_col is None:
+        raise RuntimeError(f"{path} は prefecture と capacity_kw 相当の列が必要")
+
+    out = pd.DataFrame({
+        "prefecture": df[pref_col].map(norm_text),
+        "capacity_kw": df[cap_col].map(to_number),
+        "sheet": "external",
+        "source_file": path.name,
+        "source_type": "external",
+    })
+
+    for col in [
+        "facility_id", "facility_name", "operator", "owner", "address",
+        "matched_address", "source", "source_url",
+    ]:
+        src_col = _pick_extra_col(df.columns, col)
+        out[col] = df[src_col].map(norm_text) if src_col is not None else ""
+
+    for col in ["latitude", "longitude"]:
+        src_col = _pick_extra_col(df.columns, col)
+        if src_col is not None:
+            out[col] = df[src_col].map(to_number)
+
+    out["source"] = out["source"].where(out["source"].astype(str).str.len() > 0, path.stem)
+    out = out[out["prefecture"].astype(str).str.len() > 0]
+    out = out[out["capacity_kw"].notna()]
+    out = out[out["capacity_kw"] >= min_kw]
+    return out
+
+
+def dedupe_facility_details(details: pd.DataFrame) -> pd.DataFrame:
+    """空IDの外部施設を落とさず、IDがある行だけ重複排除する。"""
+    if "facility_id" not in details.columns:
+        return details
+    details = details.copy()
+    details["facility_id"] = details["facility_id"].map(norm_text)
+    has_id = details["facility_id"].astype(str).str.len() > 0
+    without_id = details[~has_id]
+    with_id = details[has_id].drop_duplicates(subset=["facility_id"], keep="first")
+    return pd.concat([with_id, without_id], ignore_index=True)
 
 
 def build_capacity(args):
@@ -229,15 +311,21 @@ def build_capacity(args):
             print(f"  no rows: {pref}")
         detail_frames.append(detail)
 
+    for extra_path in args.extra_facilities or []:
+        path = Path(extra_path)
+        print(f"parse external facilities: {path}")
+        extra = read_extra_facilities(path, min_kw=args.min_kw)
+        if extra.empty:
+            print(f"  no rows: {path}")
+        detail_frames.append(extra)
+
     details = pd.concat(detail_frames, ignore_index=True) if detail_frames else pd.DataFrame()
     if details.empty:
         raise RuntimeError("対象設備を抽出できなかった。Excel列名または閾値を確認して。")
 
     if "facility_id" in details.columns:
         before = len(details)
-        details = details.dropna(subset=["facility_id"])
-        details = details[details["facility_id"].astype(str).str.len() > 0]
-        details = details.drop_duplicates(subset=["facility_id"], keep="first")
+        details = dedupe_facility_details(details)
         if before != len(details):
             print(f"dedupe by facility_id: {before} -> {len(details)}")
 
@@ -247,7 +335,12 @@ def build_capacity(args):
         .sort_values("capacity_kw", ascending=False)
     )
     summary["min_kw"] = args.min_kw
-    summary["source"] = "FIT/FIP publicinfo"
+    source_by_pref = (
+        details.groupby("prefecture")["source"]
+        .apply(lambda values: " + ".join(sorted({norm_text(v) for v in values if norm_text(v)})))
+        .reset_index(name="source")
+    )
+    summary = summary.drop(columns=["source"], errors="ignore").merge(source_by_pref, on="prefecture", how="left")
 
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)
     summary.to_csv(args.out, index=False, encoding="utf-8-sig")
@@ -460,17 +553,23 @@ def geocode_one(address: str, session: requests.Session, retries: int = 2) -> tu
 def geocode(args):
     src = pd.read_csv(args.detail)
     if "address" not in src.columns:
-        raise RuntimeError(f"{args.detail} に address 列がない")
+        src["address"] = ""
 
+    src["capacity_kw"] = src["capacity_kw"].map(to_number)
     src = src[src["capacity_kw"] >= args.min_kw].copy()
-    src = src.dropna(subset=["address"])
+    for col in ["latitude", "longitude", "matched_address"]:
+        if col not in src.columns:
+            src[col] = "" if col == "matched_address" else float("nan")
     print(f"geocode targets: {len(src)} (min_kw={args.min_kw})")
 
     cache: dict[str, tuple[float, float, str]] = {}
     if args.cache and Path(args.cache).exists():
         cdf = pd.read_csv(args.cache)
         for _, row in cdf.iterrows():
-            cache[row["address"]] = (float(row["latitude"]), float(row["longitude"]), str(row.get("matched_address", "")))
+            lat = to_number(row["latitude"])
+            lon = to_number(row["longitude"])
+            if pd.notna(lat) and pd.notna(lon):
+                cache[norm_text(row["address"])] = (float(lat), float(lon), str(row.get("matched_address", "")))
         print(f"loaded cache: {len(cache)} entries")
 
     session = requests.Session()
@@ -478,9 +577,19 @@ def geocode(args):
     miss = 0
     new_cache_rows = []
 
-    for i, addr in enumerate(src["address"].tolist(), 1):
-        if addr in cache:
+    for i, row in enumerate(src.to_dict("records"), 1):
+        addr = norm_text(row.get("address", ""))
+        current_lat = to_number(row.get("latitude"))
+        current_lon = to_number(row.get("longitude"))
+        if pd.notna(current_lat) and pd.notna(current_lon):
+            lat, lon = float(current_lat), float(current_lon)
+            m = norm_text(row.get("matched_address", "")) or addr
+        elif addr in cache:
             lat, lon, m = cache[addr]
+        elif not addr:
+            lat = lon = float("nan")
+            m = ""
+            miss += 1
         else:
             result = geocode_one(addr, session)
             if result is None:
@@ -523,6 +632,7 @@ def main():
     p.add_argument("--min-kw", type=float, default=1000.0, help="対象にする最小設備容量[kW]")
     p.add_argument("--data-dir", default="data")
     p.add_argument("--from-dir", default=None, help="既にダウンロード済みのFIT Excelディレクトリ")
+    p.add_argument("--extra-facilities", nargs="*", default=None, help="FIT/FIP以外の施設CSV。prefecture, capacity_kw は必須")
     p.add_argument("--include-inactive", action="store_true", help="廃止・失効らしき行を除外しない")
     p.add_argument("--out", default="data/capacity_by_prefecture.csv")
     p.add_argument("--detail-out", default="data/solar_facilities_detail.csv")

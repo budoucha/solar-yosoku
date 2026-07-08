@@ -1,8 +1,8 @@
 # solar-power-forecast
 
-国内の FIT/FIP 公表対象太陽光設備を地図上に並べ、**当日・翌日・現時点**の発電量を概算するダッシュボード。
+国内の FIT/FIP 公表対象太陽光設備と、任意追加した外部施設（例: 電力会社保有の非FIT施設）を地図上に並べ、**当日・翌日・現時点**の発電量を概算するダッシュボード。
 
-ランタイムはフロントエンドで完結し、Python は **データ取得バッチ**（FIT スクレイプ、ジオコーディング、平年値取得）専用。
+ランタイムはフロントエンドで完結し、Python は **データ取得バッチ**（FIT スクレイプ、外部施設CSVの統合、ジオコーディング、平年値取得）専用。
 
 ## アーキテクチャ
 
@@ -10,6 +10,7 @@
 
 ```
    FIT/FIP 公表 Excel ─┐                          ┌─ yr.no 雲量 (CORS可・キー不要)
+   外部施設 CSV       ─┤
                        │   [Python バッチ]        │
    国土地理院         ─┤   build-capacity         │   [フロントエンド (dashboard/)]
    ジオコーダー         │   geocode                ├─ NASA POWER 平年値 JSON
@@ -108,6 +109,18 @@ python -m solar_power_forecast build-capacity \
 ```
 
 `--prefs` で対象県を絞れる。例: `--prefs 茨城県 千葉県 鹿児島県`。
+
+FIT/FIP 以外の施設を混ぜる場合は、`--extra-facilities` にCSVを渡す。電力会社保有の非FIT施設など、公開資料から確認できた設備を手入力で追加する用途を想定している:
+
+```bash
+python -m solar_power_forecast build-capacity \
+  --min-kw 1000 \
+  --extra-facilities data/input/extra_facilities.csv \
+  --out data/output/capacity_by_prefecture.csv \
+  --detail-out data/output/solar_facilities_detail.csv
+```
+
+外部施設CSVは `prefecture`, `capacity_kw` が必須。任意で `facility_name`, `owner`, `operator`, `address`, `latitude`, `longitude`, `source`, `source_url`, `facility_id` を持てる。座標が入っている行はジオコーディング時にそのまま使う。形式例は [data/sample/sample_extra_facilities.csv](data/sample/sample_extra_facilities.csv)。
 
 ### ジオコーディング（容量データ更新時）
 

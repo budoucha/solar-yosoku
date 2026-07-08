@@ -236,6 +236,18 @@ TTL 6h で 1 日 4 回 ≈ 480 calls。日次 10,000 枠の **約 5%** で収ま
 
 施設容量データ。県別 Excel をスクレイプ。
 
+### 外部施設CSV（手入力・公開資料ベース）
+
+FIT/FIP 公表対象外の施設を追加するための任意入力。電力会社保有の太陽光発電所、実証設備、非FIT扱いの自家消費・PPA設備など、FIT/FIP Excel だけでは拾えない設備を登録する用途。
+
+- **入力方法**: `python -m solar_power_forecast build-capacity --extra-facilities <csv>`
+- **必須列**: `prefecture`, `capacity_kw`
+- **任意列**: `facility_name`, `owner`, `operator`, `address`, `latitude`, `longitude`, `source`, `source_url`, `facility_id`
+- **座標**: `latitude`, `longitude` がある行はジオコーディングせず、その座標を採用する。座標がない行は `address` を国土地理院 AddressSearch に渡す。
+- **重複管理**: `facility_id` がある行だけIDで重複排除する。FIT/FIP IDと衝突しないよう、外部施設は `tepco-...`, `kepco-...` など出典別の接頭辞を付ける。
+- **出典管理**: `source` と `source_url` に公開資料名・URLを残す。推定や目視補正の座標は、後から検証できるよう資料名または補正メモを入れる。
+- **注意**: FIT/FIP と外部施設の重複があり得るため、同一施設名・同一住所・同一容量の行は投入前に確認する。重複したまま登録すると都道府県別容量が過大になる。
+
 - **キー**: 不要
 - **CORS**: 不可・Excel スクレイプはブラウザでは現実的でない
 - **使い方**: 開発環境の Python バッチで定期取得 → 結果 CSV をコミット
