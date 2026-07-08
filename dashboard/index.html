@@ -55,7 +55,7 @@
           </div>
           <div class="metric-grid">
             <div class="metric">
-              <span>地点数</span>
+              <span>対象施設数</span>
               <strong id="metric-sites">--</strong>
             </div>
             <div class="metric">
@@ -74,25 +74,25 @@
 
           <div class="rank-section table-wrap">
             <div class="section-title">
-              <h3>地点一覧</h3>
+              <h3 id="site-list-title">都道府県一覧</h3>
               <div class="status-stack">
                 <span id="data-status">loading</span>
                 <span id="forecast-status">予測取得中…</span>
                 <span id="facility-status">施設予測取得中…</span>
               </div>
             </div>
-            <div class="table-actions">
-              <button type="button" id="prefs-all-on">全表示</button>
-              <button type="button" id="prefs-all-off">全非表示</button>
+            <div class="list-mode-control" role="radiogroup" aria-label="一覧種別">
+              <label><input type="radio" name="list-mode" value="prefecture" checked> 都道府県</label>
+              <label><input type="radio" name="list-mode" value="facility"> 施設</label>
             </div>
             <table>
-              <thead>
+              <thead id="site-table-head">
                 <tr>
-                  <th><input type="checkbox" id="prefs-master" checked title="全表示/全非表示"></th>
-                  <th>地点</th>
-                  <th>容量</th>
-                  <th id="th-generation">発電量</th>
-                  <th>CF</th>
+                  <th class="toggle-col"><input type="checkbox" id="prefs-master" checked title="全都道府県表示/全都道府県非表示"></th>
+                  <th class="site-col">都道府県</th>
+                  <th class="metric-col">容量</th>
+                  <th class="metric-col">発電量</th>
+                  <th class="metric-col">CF</th>
                 </tr>
               </thead>
               <tbody id="site-table"></tbody>

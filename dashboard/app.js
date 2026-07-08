@@ -34,13 +34,18 @@ let baselineScaleCache = new Map();
 
 const HORIZONS = ["now", "today", "tomorrow"];
 let currentHorizon = "today";
+const LIST_MODES = ["prefecture", "facility"];
+let currentListMode = "prefecture";
 
 let leafletMap = null;
 let prefectureGeoLayer = null;
 let forecastMarkersLayer = null;
 let forecastMarkerByPref = new Map();
 let hiddenPrefs = new Set();
+let facilityMarkersLayer = null;
+let hiddenFacilities = new Set();
 let prefRowsCache = null;
+let prefForecastRowsCache = [];
 let prefHourlyCache = new Map();
 let facilitiesCache = [];
 let facilityGridForecastCache = new Map();
@@ -310,9 +315,12 @@ function renderSummary(rows) {
   const totalCapacityMw = rows.reduce((sum, row) => sum + row.capacityMw, 0);
   const maxCapacityFactor = Math.max(...rows.map((row) => row.capacityFactor), 0);
   const date = rows.find((row) => row.date)?.date || "容量データ";
+  const facilityCount = Number.isFinite(prefRowsCache?.facilitiesCount)
+    ? prefRowsCache.facilitiesCount
+    : rows.length;
 
   document.querySelector("#summary-date").textContent = `${date} (${horizonLabel(currentHorizon)})`;
-  document.querySelector("#metric-sites").textContent = `${rows.length}`;
+  document.querySelector("#metric-sites").textContent = numberFormat.format(facilityCount);
   document.querySelector("#metric-capacity").textContent = `${numberFormat.format(totalCapacityMw)} MW`;
   const genLabelEl = document.querySelector("#metric-generation-label");
   if (genLabelEl) genLabelEl.textContent = metricGenerationLabel(currentHorizon);
@@ -323,27 +331,66 @@ function renderSummary(rows) {
 }
 
 
-function renderTable(rows) {
+function escapeHtml(value) {
+  return String(value ?? "").replace(/[&<>"']/g, (char) => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#39;",
+  }[char]));
+}
+
+function rowGenerationText(row) {
+  if (!Number.isFinite(row.estimatedMwh)) return "-";
+  if (currentHorizon === "now") {
+    return `${numberFormat.format(row.estimatedMwh * 1000)} kW`;
+  }
+  return `${numberFormat.format(row.estimatedMwh)} MWh`;
+}
+
+function rowCapacityFactorText(row) {
+  return Number.isFinite(row.capacityFactor) ? percentFormat.format(row.capacityFactor) : "-";
+}
+
+function updateListChrome(mode) {
+  const title = document.querySelector("#site-list-title");
+  if (title) title.textContent = mode === "facility" ? "施設一覧" : "都道府県一覧";
+}
+
+function renderPrefectureTable(rows) {
   const table = document.querySelector("#site-table");
+  const head = document.querySelector("#site-table-head");
   table.replaceChildren();
 
   const generationHeader = currentHorizon === "now" ? "出力" : "発電量";
-  const genHeaderEl = document.querySelector("#th-generation");
-  if (genHeaderEl) genHeaderEl.textContent = generationHeader;
+  head.innerHTML = `
+    <tr>
+      <th class="toggle-col"><input type="checkbox" id="prefs-master" checked title="全都道府県表示/全都道府県非表示"></th>
+      <th class="site-col">都道府県</th>
+      <th class="metric-col">容量</th>
+      <th class="metric-col">${generationHeader}</th>
+      <th class="metric-col">CF</th>
+    </tr>
+  `;
+  const master = document.querySelector("#prefs-master");
+  if (master) {
+    master.checked = hiddenPrefs.size === 0;
+    master.addEventListener("change", (e) => {
+      setAllPrefsVisible(e.target.checked);
+    });
+  }
 
   const sorted = [...rows].sort((a, b) => b.capacityMw - a.capacityMw);
   for (const row of sorted) {
     const tr = document.createElement("tr");
     const checked = hiddenPrefs.has(row.prefecture) ? "" : "checked";
-    const generationCell = currentHorizon === "now"
-      ? `${numberFormat.format(row.estimatedMwh * 1000)} kW`
-      : `${numberFormat.format(row.estimatedMwh)} MWh`;
     tr.innerHTML = `
-      <td><input type="checkbox" class="pref-toggle" data-pref="${row.prefecture}" ${checked}></td>
-      <td><div class="site-name">${row.prefecture}<span>${row.city}</span></div></td>
-      <td>${numberFormat.format(row.capacityMw)} MW</td>
-      <td>${generationCell}</td>
-      <td>${row.capacityFactor ? percentFormat.format(row.capacityFactor) : "-"}</td>
+      <td class="toggle-col"><input type="checkbox" class="pref-toggle" data-pref="${escapeHtml(row.prefecture)}" ${checked}></td>
+      <td class="site-col"><div class="site-name">${escapeHtml(row.prefecture)}<span>${escapeHtml(row.city)}</span></div></td>
+      <td class="metric-col">${numberFormat.format(row.capacityMw)} MW</td>
+      <td class="metric-col">${rowGenerationText(row)}</td>
+      <td class="metric-col">${rowCapacityFactorText(row)}</td>
     `;
     table.append(tr);
   }
@@ -351,13 +398,77 @@ function renderTable(rows) {
   if (!table.dataset.toggleBound) {
     table.addEventListener("change", (e) => {
       const cb = e.target.closest("input.pref-toggle");
-      if (!cb) return;
-      setPrefVisible(cb.dataset.pref, cb.checked);
+      if (cb) {
+        setPrefVisible(cb.dataset.pref, cb.checked);
+        return;
+      }
+
+      const facilityCb = e.target.closest("input.facility-toggle");
+      if (facilityCb) {
+        setFacilityVisible(facilityCb.dataset.facilityKey, facilityCb.checked);
+      }
     });
     table.dataset.toggleBound = "1";
   }
 }
 
+function renderFacilityTable(facilities) {
+  const table = document.querySelector("#site-table");
+  const head = document.querySelector("#site-table-head");
+  table.replaceChildren();
+
+  const generationHeader = currentHorizon === "now" ? "出力" : "発電量";
+  head.innerHTML = `
+    <tr>
+      <th class="toggle-col"><input type="checkbox" id="facilities-master" checked title="全施設表示/全施設非表示"></th>
+      <th class="site-col">施設</th>
+      <th class="metric-col">容量</th>
+      <th class="metric-col">${generationHeader}</th>
+      <th class="metric-col">CF</th>
+    </tr>
+  `;
+  const master = document.querySelector("#facilities-master");
+  if (master) {
+    master.checked = hiddenFacilities.size === 0;
+    master.addEventListener("change", (e) => {
+      setAllFacilitiesVisible(e.target.checked);
+    });
+  }
+
+  const sorted = [...facilities].sort((a, b) => b.capacityMw - a.capacityMw);
+  for (const facility of sorted) {
+    const tr = document.createElement("tr");
+    const key = facilityKey(facility);
+    const checked = hiddenFacilities.has(key) ? "" : "checked";
+    const id = facility.facilityId ? `FIT ID ${facility.facilityId}` : "FIT ID -";
+    const detail = [id, facility.address || facility.matchedAddress].filter(Boolean).join(" / ");
+    tr.innerHTML = `
+      <td class="toggle-col"><input type="checkbox" class="facility-toggle" data-facility-key="${escapeHtml(key)}" ${checked}></td>
+      <td class="site-col"><div class="site-name">${escapeHtml(facility.prefecture)}<span>${escapeHtml(detail)}</span></div></td>
+      <td class="metric-col">${numberFormat.format(facility.capacityMw)} MW</td>
+      <td class="metric-col">${rowGenerationText(facility)}</td>
+      <td class="metric-col">${rowCapacityFactorText(facility)}</td>
+    `;
+    table.append(tr);
+  }
+}
+
+function renderActiveList() {
+  updateListChrome(currentListMode);
+  if (currentListMode === "facility") {
+    renderFacilityTable(facilitiesCache);
+    document.querySelector("#data-status").textContent =
+      `${numberFormat.format(facilitiesCache.length)}施設`;
+    return;
+  }
+
+  const prefRows = prefForecastRowsCache.length ? prefForecastRowsCache : (prefRowsCache || []);
+  renderPrefectureTable(prefRows);
+  const prefCount = prefRows.length;
+  const facilityCount = prefRowsCache?.facilitiesCount ?? facilitiesCache.length;
+  document.querySelector("#data-status").textContent =
+    `${prefCount}県 / ${numberFormat.format(facilityCount)}施設`;
+}
 function snapToGrid(value, step) {
   return Math.round(value / step) * step;
 }
@@ -450,9 +561,14 @@ function facilityPopupHtml(f) {
     `;
 }
 
+function facilityKey(f) {
+  return f.facilityId || `${f.latitude},${f.longitude}`;
+}
+
 function addFacilityLayer(map, facilities) {
   if (!facilities.length) return null;
   const layer = L.layerGroup();
+  facilityMarkersLayer = layer;
   const maxMw = Math.max(...facilities.map((f) => f.capacityMw));
   facilityMarkerById.clear();
 
@@ -466,8 +582,9 @@ function addFacilityLayer(map, facilities) {
     });
     m.bindTooltip(facilityTooltipHtml(f), { direction: "top", offset: [0, -4], sticky: false });
     m.bindPopup(facilityPopupHtml(f));
-    layer.addLayer(m);
-    facilityMarkerById.set(f.facilityId || `${f.latitude},${f.longitude}`, m);
+    const key = facilityKey(f);
+    if (!hiddenFacilities.has(key)) layer.addLayer(m);
+    facilityMarkerById.set(key, m);
   }
 
   layer.addTo(map);
@@ -476,7 +593,7 @@ function addFacilityLayer(map, facilities) {
 
 function updateFacilityMarkers(facilities) {
   for (const f of facilities) {
-    const key = f.facilityId || `${f.latitude},${f.longitude}`;
+    const key = facilityKey(f);
     const m = facilityMarkerById.get(key);
     if (!m) continue;
     m.setStyle({ fillColor: facilityRateColor(f.capacityFactor) });
@@ -603,6 +720,27 @@ function setAllPrefsVisible(visible) {
     setPrefVisible(pref, visible);
   }
   document.querySelectorAll("#site-table input.pref-toggle").forEach((cb) => {
+    cb.checked = visible;
+  });
+}
+
+function setFacilityVisible(facilityKeyValue, visible) {
+  const marker = facilityMarkerById.get(facilityKeyValue);
+  if (!marker || !facilityMarkersLayer) return;
+  if (visible) {
+    hiddenFacilities.delete(facilityKeyValue);
+    if (!facilityMarkersLayer.hasLayer(marker)) facilityMarkersLayer.addLayer(marker);
+  } else {
+    hiddenFacilities.add(facilityKeyValue);
+    if (facilityMarkersLayer.hasLayer(marker)) facilityMarkersLayer.removeLayer(marker);
+  }
+}
+
+function setAllFacilitiesVisible(visible) {
+  for (const key of facilityMarkerById.keys()) {
+    setFacilityVisible(key, visible);
+  }
+  document.querySelectorAll("#site-table input.facility-toggle").forEach((cb) => {
     cb.checked = visible;
   });
 }
@@ -959,6 +1097,7 @@ async function refreshFacilityForecast({ force = false } = {}) {
       facilityGridForecastCache = cached.gridForecast;
       applyFacilityForecast(facilitiesCache, cached.gridForecast, currentHorizon);
       updateFacilityMarkers(facilitiesCache);
+      if (currentListMode === "facility") renderActiveList();
       if (statusEl) {
         const ageMin = Math.round((Date.now() - cached.savedAt) / 60000);
         statusEl.textContent = `施設予測 キャッシュ(${ageMin}分前 / ${cached.step}°)`;
@@ -990,6 +1129,7 @@ async function refreshFacilityForecast({ force = false } = {}) {
     facilityGridForecastCache = gridForecast;
     applyFacilityForecast(facilitiesCache, gridForecast, currentHorizon);
     updateFacilityMarkers(facilitiesCache);
+    if (currentListMode === "facility") renderActiveList();
     writeGridCache(FACILITY_CACHE_KEY, step, gridForecast);
     if (statusEl) {
       const t = new Date().toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit" });
@@ -1050,12 +1190,11 @@ async function refreshPrefectureForecast({ force = false } = {}) {
 function renderPrefectureViews() {
   if (!prefRowsCache) return;
   const rows = buildPrefForecastRows(prefRowsCache, currentHorizon);
+  prefForecastRowsCache = rows;
   updatePrefectureLayer(rows);
   updateForecastMarkers(rows);
   renderSummary(rows);
-  renderTable(rows);
-  document.querySelector("#data-status").textContent =
-    `${rows.length} prefs / ${prefRowsCache.facilitiesCount} sites`;
+  renderActiveList();
 }
 
 function reapplyAllForHorizon() {
@@ -1063,6 +1202,7 @@ function reapplyAllForHorizon() {
   if (facilitiesCache.length && facilityGridForecastCache.size) {
     applyFacilityForecast(facilitiesCache, facilityGridForecastCache, currentHorizon);
     updateFacilityMarkers(facilitiesCache);
+    if (currentListMode === "facility") renderActiveList();
   }
 }
 
@@ -1073,6 +1213,17 @@ function bindHorizonControl() {
       if (!HORIZONS.includes(value)) return;
       currentHorizon = value;
       reapplyAllForHorizon();
+    });
+  });
+}
+
+function bindListModeControl() {
+  document.querySelectorAll('input[name="list-mode"]').forEach((input) => {
+    input.addEventListener("change", (e) => {
+      const value = e.target.value;
+      if (!LIST_MODES.includes(value)) return;
+      currentListMode = value;
+      renderActiveList();
     });
   });
 }
@@ -1100,20 +1251,8 @@ async function main() {
 
     initMap(japanTopo, facilities);
     bindHorizonControl();
-
-    document.querySelector("#prefs-all-on").addEventListener("click", () => {
-      setAllPrefsVisible(true);
-      const m = document.querySelector("#prefs-master");
-      if (m) m.checked = true;
-    });
-    document.querySelector("#prefs-all-off").addEventListener("click", () => {
-      setAllPrefsVisible(false);
-      const m = document.querySelector("#prefs-master");
-      if (m) m.checked = false;
-    });
-    document.querySelector("#prefs-master").addEventListener("change", (e) => {
-      setAllPrefsVisible(e.target.checked);
-    });
+    bindListModeControl();
+    renderActiveList();
   } catch (error) {
     renderError(error);
     return;
