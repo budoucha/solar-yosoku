@@ -1,4 +1,4 @@
-# 太陽光発電・日射量の用語と計算
+﻿# 太陽光発電・日射量の用語と計算
 
 このプロジェクトを触るうえで知っておくと迷わない用語と式をまとめる。
 
@@ -55,13 +55,73 @@ const AZIMUTH_DEG = 0.0;          // 方位角。0=真南、-90=東、90=西
 
 ## 4. 発電量計算（このプロジェクトの式）
 
+実装は [dashboard/app.js](../dashboard/app.js) と [dashboard/solar.js](../dashboard/solar.js) にある。現在の既定データソースは `FORECAST_SOURCE = "hybrid"` で、yr.no の雲量・気温、NASA POWER 月別平年 GHI、自前の ClearSky 計算を合成する。
+
+### 日射量の作り方
+
+```
+GHI_clear [W/m²]
+  = Haurwitz クリアスカイ GHI
+
+baselineScale
+  = NASA POWER 月別 GHI 平年値 [kWh/m²/day]
+    / 同月の ClearSky GHI 月平均 [kWh/m²/day]
+  ※ 0.25〜1.25 に丸める
+
+GHI_est [W/m²]
+  = GHI_clear
+    × baselineScale
+    × (1 − 0.75 × (CloudCover / 100)^3.4)
+
+GTI_est [W/m²]
+  ≈ GHI_est × max(0.5, cos(|latitude| − tilt))
+```
+
+`baselineScale` は、Haurwitz 式だけだと地域・季節の平均日射から外れやすい点を NASA POWER の月別平年値で補正する係数。施設座標・県代表点に対して最寄りの平年値レコードを使う。
+
+### 温度補正
+
+yr.no の `air_temperature` からモジュール温度を NOCT モデルで概算し、結晶シリコンの代表的な温度係数 `γ = -0.004 / ℃` を掛ける。
+
+```
+T_cell [℃]
+  = T_air + ((NOCT − 20) / 800) × GTI_est
+  ※ NOCT = 45℃
+
+temperatureDerate
+  = 1 + γ × (T_cell − 25)
+```
+
+25℃より高いと 1 未満、低いと 1 超になり得る。日合計では各時間の `GTI_est × temperatureDerate` を積算する。
+
+### 未実装: 雨天補正
+
+現状の `hybrid` 経路では yr.no の `cloud_area_fraction` と `air_temperature` を使うが、降水量は発電量式に入れていない。そのため、雲量が同じなら「曇り」と「雨」は同じ日射低下として扱われる。
+
+実装予定として、yr.no の `precipitation_amount` などを取得し、降水時に `GTI_est` または `temperatureDerate` とは別の `rainDerate` を掛ける。例:
+
+```
+GTI_effective
+  = GTI_est × temperatureDerate × rainDerate
+
+rainDerate
+  = 1.0                  (降水なし)
+  = 0.7〜0.9             (弱い雨)
+  = 0.4〜0.7             (強い雨)
+```
+
+係数は仮置きせず、実発電量または過去日射データとの比較で校正する。
+
 ### 積算（当日/翌日モード）
 
 ```
 推定発電量 [kWh]
   = 設備容量 [kW]
   × Performance Ratio (= 0.80)
-  × その日の GTI 積算 [kWh/m²]
+  × その日の補正後 GTI 積算 [kWh/m²]
+
+補正後 GTI 積算 [kWh/m²]
+  = Σ( GTI_est_hour [W/m²] × temperatureDerate_hour / 1000 )
 ```
 
 ### 瞬時（現在モード）
@@ -71,9 +131,12 @@ const AZIMUTH_DEG = 0.0;          // 方位角。0=真南、-90=東、90=西
   = 設備容量 [kW]
   × Performance Ratio
   × (現在の GTI [W/m²] / 1000)
+  × 現在の temperatureDerate
 ```
 
 `/1000` は「STC (Standard Test Conditions) = 1000 W/m² 時にカタログ定格出力が出る」という定義から。
+
+表示上は当日/翌日は `kWh / 1000 = MWh`、現在モードは `kW` として出す。現在モードの内部変数名は `estimatedMwh` のままだが、表示時に `×1000` して kW に戻している。
 
 ---
 

@@ -117,6 +117,14 @@ h3 {
   border-top: 1px solid var(--line);
 }
 
+.leaflet-control-layers-weather-mode {
+  margin-top: 4px;
+  margin-bottom: 4px;
+  padding-top: 4px;
+  padding-bottom: 4px;
+  border-top: 1px solid var(--line);
+}
+
 .leaflet-popup-content {
   min-width: 210px;
   margin: 12px 14px;

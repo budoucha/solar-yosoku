@@ -16,11 +16,15 @@ const YR_URL = "https://api.met.no/weatherapi/locationforecast/2.0/compact";
 const FORECAST_GRID_STEP = 0.5;
 const FORECAST_GRID_STEP_FALLBACK = 1.0;
 const FORECAST_GRID_MAX_POINTS = 400;
+const WEATHER_GRID_FILL_OPACITY = 0.62;
 const FORECAST_REFRESH_MS = 60 * 60 * 1000;          // hybrid: 1時間
 const FORECAST_REFRESH_MS_OPENMETEO = 3 * 60 * 60 * 1000;
 
 const YR_REQUEST_INTERVAL_MS = 120;                   // yr.no への礼儀正しい間隔
 const HYBRID_CACHE_TTL_MS = 60 * 60 * 1000;           // 1時間
+const API_CONSECUTIVE_FAILURE_LIMIT = 3;
+const API_COOLDOWN_MS_ON_CONSECUTIVE_FAILURES = 10 * 60 * 1000;
+const API_COOLDOWN_MS_ON_429 = 30 * 60 * 1000;
 
 const PERFORMANCE_RATIO = 0.80;
 const TILT_DEG = 30.0;
@@ -44,9 +48,12 @@ const HORIZONS = ["now", "today", "tomorrow"];
 let currentHorizon = "today";
 const LIST_MODES = ["prefecture", "facility"];
 let currentListMode = "prefecture";
+const WEATHER_FILL_MODES = ["prefecture", "grid"];
+let currentWeatherFillMode = "prefecture";
 
 let leafletMap = null;
 let prefectureGeoLayer = null;
+let weatherGridLayer = null;
 let forecastMarkersLayer = null;
 let forecastMarkerByPref = new Map();
 let hiddenPrefs = new Set();
@@ -61,6 +68,8 @@ let facilityGridForecastCache = new Map();
 let facilityMarkerById = new Map();
 let facilityById = new Map();
 let facilityGridStep = FORECAST_GRID_STEP;
+let weatherGridStats = null;
+let forecastRefreshRunning = false;
 
 const JAPAN_BOUNDS = [
   [24.0, 122.0],
@@ -238,6 +247,23 @@ function aggregateHourly(hourly, horizon) {
   };
 }
 
+function estimateGenerationFromHourly(capacityKw, hourly, horizon) {
+  const agg = aggregateHourly(hourly, horizon);
+  const capacityMw = capacityKw / 1000;
+  let estimatedMwh = 0;
+  let capacityFactor = 0;
+  if (horizon === "now") {
+    const kw = capacityKw * PERFORMANCE_RATIO * (agg.gtiNowWm2 / 1000) * agg.derateNow;
+    estimatedMwh = kw / 1000;
+    capacityFactor = capacityKw > 0 ? kw / capacityKw : 0;
+  } else {
+    const kwh = capacityKw * PERFORMANCE_RATIO * agg.deratedGtiKwhM2;
+    estimatedMwh = kwh / 1000;
+    capacityFactor = capacityMw > 0 ? kwh / (capacityKw * 24) : 0;
+  }
+  return { agg, estimatedMwh, capacityFactor };
+}
+
 function buildPrefRows(pointRows, capacityRows) {
   setProgress("都道府県行算出", "算出中", { points: pointRows.length, capacityRows: capacityRows.length });
   const capById = new Map(capacityRows.map((r) => [r.prefecture, r]));
@@ -266,18 +292,8 @@ function buildPrefForecastRows(prefList, horizon) {
   const out = [];
   for (const pref of prefList) {
     const hourly = prefHourlyCache.get(pref.prefecture);
-    const agg = aggregateHourly(hourly, horizon);
     const capacityMw = pref.capacityKw / 1000;
-    let estimatedMwh = 0;
-    let capacityFactor = 0;
-    if (horizon === "now") {
-      const kw = pref.capacityKw * PERFORMANCE_RATIO * (agg.gtiNowWm2 / 1000) * agg.derateNow;
-      estimatedMwh = kw / 1000;
-      capacityFactor = capacityMw > 0 ? estimatedMwh / capacityMw : 0;
-    } else {
-      estimatedMwh = (pref.capacityKw * PERFORMANCE_RATIO * agg.deratedGtiKwhM2) / 1000;
-      capacityFactor = capacityMw > 0 ? estimatedMwh / (capacityMw * 24) : 0;
-    }
+    const { agg, estimatedMwh, capacityFactor } = estimateGenerationFromHourly(pref.capacityKw, hourly, horizon);
     out.push({
       prefecture: pref.prefecture,
       city: pref.city,
@@ -711,6 +727,60 @@ function addFacilityClassControl(layerControl) {
   overlays.append(group);
 }
 
+function weatherFillModeLabel(mode) {
+  return mode === "grid" ? "天気面: グリッド" : "天気面: 都道府県";
+}
+
+function updateWeatherFillLayers() {
+  if (leafletMap && weatherGridLayer) {
+    const shouldShowGrid = currentWeatherFillMode === "grid";
+    if (shouldShowGrid && !leafletMap.hasLayer(weatherGridLayer)) {
+      weatherGridLayer.addTo(leafletMap);
+    } else if (!shouldShowGrid && leafletMap.hasLayer(weatherGridLayer)) {
+      leafletMap.removeLayer(weatherGridLayer);
+    }
+  }
+  updatePrefectureLayer(prefForecastRowsCache);
+}
+
+function setWeatherFillMode(mode) {
+  if (!WEATHER_FILL_MODES.includes(mode)) return;
+  currentWeatherFillMode = mode;
+  updateWeatherFillLayers();
+}
+
+function addWeatherFillControl(layerControl) {
+  const overlays = layerControl.getContainer()?.querySelector(".leaflet-control-layers-overlays");
+  if (!overlays) return;
+
+  const group = document.createElement("div");
+  group.className = "leaflet-control-layers-weather-mode";
+
+  for (const mode of WEATHER_FILL_MODES) {
+    const label = document.createElement("label");
+    const span = document.createElement("span");
+    const input = document.createElement("input");
+    const text = document.createElement("span");
+
+    input.type = "radio";
+    input.name = "weather-fill-mode";
+    input.value = mode;
+    input.checked = mode === currentWeatherFillMode;
+    input.className = "leaflet-control-layers-selector weather-fill-radio";
+    input.addEventListener("change", (e) => {
+      if (!e.target.checked) return;
+      setWeatherFillMode(e.target.value);
+    });
+
+    text.textContent = ` ${weatherFillModeLabel(mode)}`;
+    span.append(input, text);
+    label.append(span);
+    group.append(label);
+  }
+
+  overlays.prepend(group);
+}
+
 function addFacilityLayer(map, facilities) {
   if (!facilities.length) return null;
   const layer = L.layerGroup();
@@ -751,6 +821,129 @@ function updateFacilityMarkers(facilities) {
   }
 }
 
+function gridCellBounds(lat, lon, step) {
+  const half = step / 2;
+  return [
+    [lat - half, lon - half],
+    [lat + half, lon + half],
+  ];
+}
+
+function gridFacilityStats(facilities) {
+  const stats = new Map();
+  for (const f of facilities) {
+    if (!f.gridKey) continue;
+    const current = stats.get(f.gridKey) || { facilities: 0, capacityMw: 0 };
+    current.facilities += 1;
+    current.capacityMw += f.capacityMw || 0;
+    stats.set(f.gridKey, current);
+  }
+  return stats;
+}
+
+function buildWeatherGridRows(gridForecast, step, horizon) {
+  const facilityStats = gridFacilityStats(facilitiesCache);
+  const rows = [];
+  const keys = new Set([...facilityStats.keys(), ...gridForecast.keys()]);
+  for (const key of keys) {
+    const [lat, lon] = key.split(",").map(Number);
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
+    const hourly = gridForecast.get(key);
+    const agg = hasUsableHourly(hourly) ? aggregateHourly(hourly, horizon) : { cloudPct: NaN };
+    const stats = facilityStats.get(key) || { facilities: 0, capacityMw: 0 };
+    rows.push({
+      key,
+      lat,
+      lon,
+      cloudPct: agg.cloudPct,
+      facilities: stats.facilities,
+      capacityMw: stats.capacityMw,
+    });
+  }
+  return rows;
+}
+
+function weatherGridColor(cloudPct) {
+  return Number.isFinite(cloudPct) ? weatherColor(cloudPct) : "#bfdbfe";
+}
+
+function publishWeatherGridStats() {
+  if (!weatherGridStats) return;
+  const root = document.documentElement;
+  root.dataset.weatherGridStatus = weatherGridStats.status;
+  root.dataset.weatherGridCells = String(weatherGridStats.cells);
+  root.dataset.weatherGridDurationMs = String(weatherGridStats.durationMs);
+}
+
+function updateWeatherGridLayer() {
+  if (!weatherGridLayer) return;
+  const started = performance.now();
+  weatherGridLayer.clearLayers();
+
+  if (!(facilityGridStep > 0)) {
+    weatherGridStats = {
+      horizon: currentHorizon,
+      step: facilityGridStep,
+      cells: 0,
+      durationMs: 0,
+      status: "no-data",
+    };
+    publishWeatherGridStats();
+    setProgress("天気グリッド描画", "待機中", weatherGridStats);
+    return;
+  }
+
+  const rows = buildWeatherGridRows(facilityGridForecastCache, facilityGridStep, currentHorizon);
+  if (!rows.length) {
+    weatherGridStats = {
+      horizon: currentHorizon,
+      step: facilityGridStep,
+      cells: 0,
+      durationMs: 0,
+      status: "no-grid",
+    };
+    publishWeatherGridStats();
+    setProgress("天気グリッド描画", "待機中", weatherGridStats);
+    return;
+  }
+
+  setProgress("天気グリッド描画", "描画中", {
+    horizon: currentHorizon,
+    step: facilityGridStep,
+    cells: rows.length,
+    forecastCells: facilityGridForecastCache.size,
+  });
+
+  for (const row of rows) {
+    const cell = L.rectangle(gridCellBounds(row.lat, row.lon, facilityGridStep), {
+      pane: "weatherGridPane",
+      stroke: false,
+      fillColor: weatherGridColor(row.cloudPct),
+      fillOpacity: WEATHER_GRID_FILL_OPACITY,
+      interactive: false,
+    });
+    weatherGridLayer.addLayer(cell);
+  }
+
+  const durationMs = performance.now() - started;
+  weatherGridStats = {
+    horizon: currentHorizon,
+    step: facilityGridStep,
+    cells: rows.length,
+    forecastCells: facilityGridForecastCache.size,
+    facilities: rows.reduce((sum, row) => sum + row.facilities, 0),
+    capacityMw: Number(rows.reduce((sum, row) => sum + row.capacityMw, 0).toFixed(1)),
+    durationMs: Number(durationMs.toFixed(1)),
+    status: facilityGridForecastCache.size > 0 ? "rendered" : "placeholder",
+  };
+  publishWeatherGridStats();
+  if (facilityGridForecastCache.size > 0) {
+    completeProgress("天気グリッド描画", weatherGridStats);
+  } else {
+    setProgress("天気グリッド描画", "仮描画", weatherGridStats);
+  }
+}
+
 function initMap(japanTopo, facilities) {
   setProgress("地図初期化", "処理中", {
     topojson: japanTopo ? "あり" : "なし",
@@ -769,6 +962,8 @@ function initMap(japanTopo, facilities) {
 
   map.createPane("prefecturePane");
   map.getPane("prefecturePane").style.zIndex = 390;
+  map.createPane("weatherGridPane");
+  map.getPane("weatherGridPane").style.zIndex = 410;
   map.createPane("forecastMarkerPane");
   map.getPane("forecastMarkerPane").style.zIndex = 450;
   map.createPane("facilityMarkerPane");
@@ -789,6 +984,7 @@ function initMap(japanTopo, facilities) {
     }).addTo(map);
   }
 
+  weatherGridLayer = L.layerGroup();
   const facilityLayer = addFacilityLayer(map, facilities || []);
 
   forecastMarkersLayer = L.layerGroup();
@@ -797,7 +993,9 @@ function initMap(japanTopo, facilities) {
     "都道府県マーカー": forecastMarkersLayer,
   };
   const layerControl = L.control.layers(null, overlays, { position: "topright", collapsed: false }).addTo(map);
+  addWeatherFillControl(layerControl);
   if (facilityLayer) addFacilityClassControl(layerControl);
+  updateWeatherFillLayers();
 
   requestAnimationFrame(() => {
     map.invalidateSize();
@@ -812,13 +1010,14 @@ function initMap(japanTopo, facilities) {
 function updatePrefectureLayer(rows) {
   if (!prefectureGeoLayer) return;
   const byPref = new Map(rows.map((r) => [r.prefecture, r]));
+  const showPrefectureWeather = currentWeatherFillMode === "prefecture";
   prefectureGeoLayer.setStyle((feature) => {
     const r = byPref.get(feature.properties.nam_ja);
     return {
       color: "#8a9fa8",
       weight: 0.6,
-      fillColor: weatherColor(r?.cloudCoverPct),
-      fillOpacity: 0.7,
+      fillColor: showPrefectureWeather ? weatherColor(r?.cloudCoverPct) : "#f8fafc",
+      fillOpacity: showPrefectureWeather ? 0.7 : 0,
     };
   });
 }
@@ -1041,14 +1240,16 @@ function baselineScaleForHour(jstHour, factors) {
 
 // yr.no compact エンドポイントから cloud_area_fraction を取得
 async function fetchYrCloudHourly(lat, lon, cachedHourly) {
+  assertApiNotCoolingDown("yr", "yr.no");
   const url = `${YR_URL}?lat=${lat.toFixed(4)}&lon=${lon.toFixed(4)}`;
   const headers = { "Accept": "application/json" };
-  if (hasUsableHourly(cachedHourly) && cachedHourly.lastModified) {
-    headers["If-Modified-Since"] = cachedHourly.lastModified;
-  }
+  // Do not send conditional headers from the browser. `If-Modified-Since`
+  // triggers a CORS preflight, and api.met.no does not allow that OPTIONS
+  // request from localhost. The localStorage TTL cache above still prevents
+  // normal reloads from re-fetching for one hour.
   const res = await fetch(url, { headers });
   if (res.status === 304) return { notModified: true };
-  if (!res.ok) throw new Error(`yr.no ${res.status}`);
+  if (!res.ok) throw createApiHttpError("yr.no", res.status);
   const data = await res.json();
   const series = data.properties?.timeseries || [];
   const times = [];
@@ -1123,9 +1324,17 @@ async function fetchHybridForCoords(coords, onProgress, cachedHourlyArr = []) {
         results[i] = hourly;
         okCount += 1;
       }
+      clearApiFailureState("yr");
     } catch (e) {
       results[i] = null;
       console.warn(`yr.no fetch fail ${key}:`, e.message);
+      if (!e.apiCooldown) recordApiFailure("yr", e);
+      const cooldownLeft = getApiCooldownRemainingMs("yr");
+      if (cooldownLeft > 0) {
+        console.warn(`yr.no fetch suspended for ${Math.ceil(cooldownLeft / 60000)}分`);
+        if (onProgress) onProgress(i + 1, coords.length, okCount, notModCount);
+        break;
+      }
     }
     if (onProgress) onProgress(i + 1, coords.length, okCount, notModCount);
     if (i + 1 < coords.length) {
@@ -1137,28 +1346,87 @@ async function fetchHybridForCoords(coords, onProgress, cachedHourlyArr = []) {
 
 // === Open-Meteo パス（既存） ==============================================
 
-const COOLDOWN_KEY = "open_meteo_cooldown_until";
-const COOLDOWN_MS_ON_429 = 30 * 60 * 1000;
+const API_COOLDOWN_KEYS = {
+  openMeteo: "open_meteo_cooldown_until",
+  yr: "yr_cooldown_until_v2",
+};
 
-function getCooldownRemainingMs() {
+const API_FAILURE_KEYS = {
+  openMeteo: "open_meteo_consecutive_failures",
+  yr: "yr_consecutive_failures_v2",
+};
+
+function createApiHttpError(label, status) {
+  const error = new Error(`${label} ${status}`);
+  error.status = status;
+  return error;
+}
+
+function getStoredNumber(key) {
   try {
-    const v = Number(localStorage.getItem(COOLDOWN_KEY) || 0);
+    const value = Number(localStorage.getItem(key) || 0);
+    return Number.isFinite(value) ? value : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function setStoredNumber(key, value) {
+  try {
+    localStorage.setItem(key, String(value));
+  } catch {}
+}
+
+function removeStoredValue(key) {
+  try {
+    localStorage.removeItem(key);
+  } catch {}
+}
+
+function getApiCooldownRemainingMs(api) {
+  try {
+    const v = getStoredNumber(API_COOLDOWN_KEYS[api]);
     const left = v - Date.now();
     return left > 0 ? left : 0;
   } catch { return 0; }
 }
 
-function setCooldown(ms) {
-  try {
-    localStorage.setItem(COOLDOWN_KEY, String(Date.now() + ms));
-  } catch {}
+function setApiCooldown(api, ms) {
+  setStoredNumber(API_COOLDOWN_KEYS[api], Date.now() + ms);
+}
+
+function assertApiNotCoolingDown(api, label) {
+  const cooldownLeft = getApiCooldownRemainingMs(api);
+  if (cooldownLeft > 0) {
+    const error = new Error(`${label} cooldown ${Math.ceil(cooldownLeft / 60000)}分`);
+    error.apiCooldown = true;
+    throw error;
+  }
+}
+
+function clearApiFailureState(api) {
+  removeStoredValue(API_FAILURE_KEYS[api]);
+}
+
+function recordApiFailure(api, error) {
+  if (error?.status === 429) {
+    clearApiFailureState(api);
+    setApiCooldown(api, API_COOLDOWN_MS_ON_429);
+    return;
+  }
+
+  const key = API_FAILURE_KEYS[api];
+  const consecutiveFailures = getStoredNumber(key) + 1;
+  if (consecutiveFailures >= API_CONSECUTIVE_FAILURE_LIMIT) {
+    clearApiFailureState(api);
+    setApiCooldown(api, API_COOLDOWN_MS_ON_CONSECUTIVE_FAILURES);
+    return;
+  }
+  setStoredNumber(key, consecutiveFailures);
 }
 
 async function fetchHourlyForCoords(coords) {
-  const cooldownLeft = getCooldownRemainingMs();
-  if (cooldownLeft > 0) {
-    throw new Error(`Open-Meteo cooldown ${Math.ceil(cooldownLeft / 60000)}分`);
-  }
+  assertApiNotCoolingDown("openMeteo", "Open-Meteo");
   const params = new URLSearchParams({
     latitude: coords.map((c) => c.lat).join(","),
     longitude: coords.map((c) => c.lon).join(","),
@@ -1170,8 +1438,15 @@ async function fetchHourlyForCoords(coords) {
     models: FORECAST_MODEL,
     cell_selection: "land",
   });
-  const res = await fetch(`${OPEN_METEO_URL}?${params}`);
+  let res;
+  try {
+    res = await fetch(`${OPEN_METEO_URL}?${params}`);
+  } catch (e) {
+    recordApiFailure("openMeteo", e);
+    throw e;
+  }
   if (res.ok) {
+    clearApiFailureState("openMeteo");
     const data = await res.json();
     const arr = Array.isArray(data) ? data : [data];
     return arr.map((resp) => {
@@ -1183,10 +1458,9 @@ async function fetchHourlyForCoords(coords) {
       };
     });
   }
-  if (res.status === 429) {
-    setCooldown(COOLDOWN_MS_ON_429);
-  }
-  throw new Error(`Open-Meteo ${res.status}`);
+  const error = createApiHttpError("Open-Meteo", res.status);
+  recordApiFailure("openMeteo", error);
+  throw error;
 }
 
 async function fetchForecastForGrid(gridPoints, onProgress, cachedHourlyArr = []) {
@@ -1219,37 +1493,40 @@ function applyFacilityForecast(facilities, gridForecast, horizon) {
   setProgress("施設予測算出", "算出中", {
     facilities: facilities.length,
     gridPoints: gridForecast.size,
+    prefFallbackPoints: prefHourlyCache.size,
     horizon,
   });
   let available = 0;
+  let gridAvailable = 0;
+  let prefFallbackAvailable = 0;
   for (const f of facilities) {
-    const hourly = gridForecast.get(f.gridKey);
+    const gridHourly = gridForecast.get(f.gridKey);
+    const prefHourly = prefHourlyCache.get(f.prefecture);
+    const hourly = gridHourly || prefHourly;
     if (!hourly) {
       f.estimatedMwh = null;
       f.capacityFactor = null;
       f.gtiKwhM2 = null;
       f.cloudPct = null;
+      f.forecastSource = "";
       continue;
     }
-    const agg = aggregateHourly(hourly, horizon);
+    const { agg, estimatedMwh, capacityFactor } = estimateGenerationFromHourly(f.capacityKw, hourly, horizon);
     f.gtiKwhM2 = agg.gtiKwhM2;
     f.cloudPct = agg.cloudPct;
-    if (horizon === "now") {
-      const kw = f.capacityKw * PERFORMANCE_RATIO * (agg.gtiNowWm2 / 1000) * agg.derateNow;
-      f.estimatedMwh = kw / 1000;
-      f.capacityFactor = f.capacityKw > 0 ? kw / f.capacityKw : 0;
-    } else {
-      const kwh = f.capacityKw * PERFORMANCE_RATIO * agg.deratedGtiKwhM2;
-      f.estimatedMwh = kwh / 1000;
-      f.capacityFactor = f.capacityKw > 0 ? kwh / (f.capacityKw * 24) : 0;
-    }
+    f.estimatedMwh = estimatedMwh;
+    f.capacityFactor = capacityFactor;
+    f.forecastSource = gridHourly ? "grid" : "prefecture";
+    if (gridHourly) gridAvailable += 1;
+    else prefFallbackAvailable += 1;
     if (Number.isFinite(f.estimatedMwh)) available += 1;
   }
-  if (!gridForecast.size) {
+  if (!gridForecast.size && !prefFallbackAvailable) {
     setProgress("施設予測算出", "未算出", {
       facilities: facilities.length,
       available,
       gridPoints: gridForecast.size,
+      prefFallbackAvailable,
       horizon,
       reason: "予測データなし",
     });
@@ -1258,6 +1535,8 @@ function applyFacilityForecast(facilities, gridForecast, horizon) {
   completeProgress("施設予測算出", {
     facilities: facilities.length,
     available,
+    gridAvailable,
+    prefFallbackAvailable,
     gridPoints: gridForecast.size,
     horizon,
   });
@@ -1311,6 +1590,7 @@ async function refreshFacilityForecast({ force = false } = {}) {
       facilityGridForecastCache = cached.gridForecast;
       applyFacilityForecast(facilitiesCache, cached.gridForecast, currentHorizon);
       updateFacilityMarkers(facilitiesCache);
+      updateWeatherGridLayer();
       if (currentListMode === "facility") renderActiveList();
       if (statusEl) {
         const ageMin = Math.round((Date.now() - cached.savedAt) / 60000);
@@ -1340,6 +1620,7 @@ async function refreshFacilityForecast({ force = false } = {}) {
     }
     facilityGridStep = step;
     facilityGridForecastCache = new Map();
+    updateWeatherGridLayer();
     console.log(`[facility forecast] source=${FORECAST_SOURCE} step=${step}° unique grid points=${gridPoints.length}`);
     const onProgress = (done, total, okCount = 0, notModCount = 0) => {
       if (statusEl) statusEl.textContent = `施設予測取得中… ${done}/${total}`;
@@ -1356,7 +1637,7 @@ async function refreshFacilityForecast({ force = false } = {}) {
       ? gridPoints.map((pt) => expiredCache.gridForecast.get(gridKey(pt.lat, pt.lon)))
       : [];
     const gridForecast = await fetchForecastForGrid(gridPoints, onProgress, cachedHourlyArr);
-    if (!gridForecast.size) {
+    if (!gridForecast.size && !prefHourlyCache.size) {
       throw new Error(`施設予測データ0件 (${gridPoints.length}格子すべて取得失敗)`);
     }
     completeProgress("施設予測取得", {
@@ -1364,17 +1645,36 @@ async function refreshFacilityForecast({ force = false } = {}) {
       gridPoints: gridForecast.size,
       total: gridPoints.length,
       step,
+      prefFallbackPoints: prefHourlyCache.size,
     });
     facilityGridForecastCache = gridForecast;
     applyFacilityForecast(facilitiesCache, gridForecast, currentHorizon);
     updateFacilityMarkers(facilitiesCache);
+    updateWeatherGridLayer();
     if (currentListMode === "facility") renderActiveList();
-    writeGridCache(FACILITY_CACHE_KEY, step, gridForecast);
+    if (gridForecast.size) writeGridCache(FACILITY_CACHE_KEY, step, gridForecast);
     if (statusEl) {
       const t = new Date().toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit" });
-      statusEl.textContent = `施設予測 ${t} 更新 (${gridForecast.size}/${gridPoints.length}格子 / ${step}°)`;
+      const fallbackLabel = gridForecast.size < gridPoints.length && prefHourlyCache.size
+        ? " / 不足分は都道府県で代替"
+        : "";
+      statusEl.textContent = `施設予測 ${t} 更新 (${gridForecast.size}/${gridPoints.length}格子 / ${step}°${fallbackLabel})`;
     }
   } catch (e) {
+    if (prefHourlyCache.size) {
+      facilityGridForecastCache = new Map();
+      applyFacilityForecast(facilitiesCache, facilityGridForecastCache, currentHorizon);
+      updateFacilityMarkers(facilitiesCache);
+      updateWeatherGridLayer();
+      if (currentListMode === "facility") renderActiveList();
+      if (statusEl) statusEl.textContent = `施設予測 グリッド失敗、都道府県で代替: ${e.message}`;
+      completeProgress("施設予測取得", {
+        source: "prefecture-fallback",
+        prefFallbackPoints: prefHourlyCache.size,
+        error: e.message,
+      });
+      return;
+    }
     if (statusEl) statusEl.textContent = `施設予測失敗: ${e.message}`;
     failProgress("施設予測取得", e, { source: FORECAST_SOURCE });
   }
@@ -1468,9 +1768,10 @@ function renderPrefectureViews() {
 
 function reapplyAllForHorizon() {
   if (prefRowsCache && prefHourlyCache.size) renderPrefectureViews();
-  if (facilitiesCache.length && facilityGridForecastCache.size) {
+  if (facilitiesCache.length && (facilityGridForecastCache.size || prefHourlyCache.size)) {
     applyFacilityForecast(facilitiesCache, facilityGridForecastCache, currentHorizon);
     updateFacilityMarkers(facilitiesCache);
+    updateWeatherGridLayer();
     if (currentListMode === "facility") renderActiveList();
   }
 }
@@ -1496,6 +1797,17 @@ function bindListModeControl() {
       renderFacilityLayer();
     });
   });
+}
+
+async function refreshAllForecasts({ force = false } = {}) {
+  if (forecastRefreshRunning) return;
+  forecastRefreshRunning = true;
+  try {
+    await refreshPrefectureForecast({ force });
+    await refreshFacilityForecast({ force });
+  } finally {
+    forecastRefreshRunning = false;
+  }
 }
 
 async function main() {
@@ -1528,12 +1840,8 @@ async function main() {
     return;
   }
 
-  (async () => {
-    await refreshFacilityForecast();
-    await refreshPrefectureForecast();
-  })();
-  setInterval(() => refreshFacilityForecast({ force: true }), FORECAST_REFRESH_MS);
-  setInterval(() => refreshPrefectureForecast({ force: true }), FORECAST_REFRESH_MS + 30 * 1000);
+  refreshAllForecasts();
+  setInterval(() => refreshAllForecasts({ force: true }), FORECAST_REFRESH_MS);
 }
 
 main();
