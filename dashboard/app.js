@@ -35,11 +35,107 @@ const BASELINE_SCALE_MAX = 1.25;
 const FACILITY_CAPACITY_THRESHOLDS_MW = [5, 10, 50];
 const DEFAULT_FACILITY_CAPACITY_THRESHOLD_MW = 5;
 
-function setProgress() {}
-function completeProgress() {}
-function failProgress() {}
-function datasetProgressName(path) { return path; }
+const progressStart = 0;
+const progressState = new Map();
 
+function elapsedSinceLoadMs() {
+  return Math.round(performance.now() - progressStart);
+}
+
+function formatElapsed(ms) {
+  if (!Number.isFinite(ms)) return "-";
+  return `${(ms / 1000).toFixed(2)}s`;
+}
+
+function summarizeProgressDetail(detail) {
+  if (!detail || typeof detail !== "object") return detail ?? "";
+  return Object.entries(detail)
+    .map(([key, value]) => `${key}=${value}`)
+    .join(", ");
+}
+
+function setProgress(name, status, detail = {}) {
+  const previous = progressState.get(name) || {};
+  const nowMs = elapsedSinceLoadMs();
+  const shouldResetStart = (
+    !previous.name
+    || ["待機中", "スキップ", "完了", "失敗"].includes(previous.status)
+  ) && !["待機中", "スキップ"].includes(status);
+  progressState.set(name, {
+    name,
+    status,
+    detail,
+    startedAtMs: shouldResetStart ? nowMs : (previous.startedAtMs ?? nowMs),
+    updatedAtMs: nowMs,
+  });
+}
+
+function completeProgress(name, detail = {}) {
+  const entry = progressState.get(name);
+  const elapsedMs = elapsedSinceLoadMs();
+  const startedAtMs = entry?.startedAtMs ?? elapsedMs;
+  setProgress(name, "完了", detail);
+  console.log(
+    `[progress] ${name} 完了: load+${formatElapsed(elapsedMs)} `
+    + `(処理時間 ${formatElapsed(elapsedMs - startedAtMs)})`
+    + (Object.keys(detail).length ? ` ${summarizeProgressDetail(detail)}` : "")
+  );
+}
+
+function failProgress(name, error, detail = {}) {
+  const elapsedMs = elapsedSinceLoadMs();
+  const message = error?.message || String(error);
+  setProgress(name, "失敗", { ...detail, error: message });
+  console.warn(`[progress] ${name} 失敗: load+${formatElapsed(elapsedMs)} ${message}`);
+}
+
+function datasetProgressName(path) {
+  if (path === DATASETS.points) return "代表地点CSV取得";
+  if (path === DATASETS.capacity) return "設備容量CSV取得";
+  if (path === DATASETS.facilities) return "施設CSV取得";
+  if (path === DATASETS.japan) return "TopoJSON取得";
+  if (path === DATASETS.baseline) return "日射平年値JSON取得";
+  return path;
+}
+
+function progressSnapshot() {
+  return Array.from(progressState.values()).map((entry) => ({
+    name: entry.name,
+    status: entry.status,
+    detail: summarizeProgressDetail(entry.detail),
+    elapsed: `load+${formatElapsed(entry.updatedAtMs)}`,
+    processing: formatElapsed(entry.updatedAtMs - entry.startedAtMs),
+  }));
+}
+
+window.solarProgress = function solarProgress() {
+  const snapshot = progressSnapshot();
+  console.table(snapshot);
+  return snapshot;
+};
+window.printSolarProgress = window.solarProgress;
+
+window.solarWeatherGridStats = function solarWeatherGridStats() {
+  console.table(weatherGridStats ? [weatherGridStats] : []);
+  return weatherGridStats;
+};
+
+[
+  "代表地点CSV取得",
+  "設備容量CSV取得",
+  "施設CSV取得",
+  "TopoJSON取得",
+  "日射平年値JSON取得",
+  "都道府県行算出",
+  "施設行算出",
+  "地図初期化",
+  "施設予測取得",
+  "施設予測算出",
+  "天気グリッド描画",
+  "都道府県予測取得",
+  "都道府県予測算出",
+  "サマリー算出",
+].forEach((name) => setProgress(name, "待機中"));
 
 let baselineByPref = null;  // { 県名: { lat, lon, monthly_ghi_kwh_m2_day: [12] } }
 let baselineScaleCache = new Map();
