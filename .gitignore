@@ -26,6 +26,7 @@ data/*.csv
 
 # Local tools
 .tools/
+.codex-*
 
 # OS / editor
 .DS_Store
