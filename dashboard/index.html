@@ -26,20 +26,29 @@
           <div class="legend" aria-label="凡例">
             <strong class="legend-heading">県別 推定発電量（円）</strong>
             <div class="legend-row">
-              <span class="legend-dot low"></span><span>低</span>
+              <span class="legend-dot low" aria-hidden="true"></span>
               <span class="legend-bar"></span>
-              <span class="legend-dot high"></span><span>高</span>
+              <span class="legend-dot high" aria-hidden="true"></span>
             </div>
+            <div class="legend-scale-labels"><span>低</span><span>中</span><span>高</span></div>
             <strong class="legend-heading">個別施設 (予想発電率)</strong>
             <div class="legend-row">
               <span class="legend-facility-bar"></span>
             </div>
             <div class="legend-gti-labels"><span>0%</span><span>15%</span><span>30%+</span></div>
-            <strong class="legend-heading">天気（面 / 格子）</strong>
+            <strong class="legend-heading">天気（面 / 格子・昼）</strong>
             <div class="legend-row">
               <span class="legend-weather-bar"></span>
             </div>
             <div class="legend-gti-labels"><span>晴れ</span><span>曇り</span></div>
+            <div id="legend-weather-night" class="legend-weather-night" hidden>
+              <strong class="legend-heading">天気（現在・夜）</strong>
+              <div class="legend-row">
+                <span class="legend-weather-night-bar"></span>
+              </div>
+              <div class="legend-gti-labels"><span>快晴</span><span>曇り</span></div>
+            </div>
+            <div class="legend-missing"><span class="legend-missing-swatch"></span><span>データなし</span></div>
           </div>
         </section>
 
@@ -53,6 +62,19 @@
             <label><input type="radio" name="horizon" value="today" checked> 当日</label>
             <label><input type="radio" name="horizon" value="tomorrow"> 翌日</label>
           </div>
+          <section id="color-preview-control" class="color-preview-control" data-preview="live" aria-labelledby="color-preview-label">
+            <div class="color-preview-head">
+              <span id="color-preview-label">配色確認</span>
+              <span id="color-preview-status">実データ</span>
+            </div>
+            <div class="color-preview-buttons" role="group" aria-label="配色確認用ダミー状態">
+              <button type="button" data-color-preview="live" aria-pressed="true">実データ</button>
+              <button type="button" data-color-preview="day" aria-pressed="false">昼ダミー</button>
+              <button type="button" data-color-preview="night" aria-pressed="false">夜ダミー</button>
+            </div>
+            <div class="color-preview-gradient" aria-hidden="true"></div>
+            <div class="color-preview-axis"><span>福岡・晴れ 0%</span><span>札幌・曇り 100%</span></div>
+          </section>
           <div class="metric-grid">
             <div class="metric">
               <span>対象施設数</span>
@@ -105,6 +127,7 @@
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
     <script src="https://unpkg.com/topojson-client@3"></script>
     <script src="./solar.js"></script>
+    <script src="./colors.js"></script>
     <script src="./app.js"></script>
   </body>
 </html>

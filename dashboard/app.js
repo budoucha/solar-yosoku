@@ -16,7 +16,8 @@ const YR_URL = "https://api.met.no/weatherapi/locationforecast/2.0/compact";
 const FORECAST_GRID_STEP = 0.5;
 const FORECAST_GRID_STEP_FALLBACK = 1.0;
 const FORECAST_GRID_MAX_POINTS = 400;
-const WEATHER_GRID_FILL_OPACITY = 0.62;
+const WEATHER_GRID_FILL_OPACITY = 1;
+const WEATHER_PREFECTURE_FILL_OPACITY = 1;
 const FORECAST_REFRESH_MS = 60 * 60 * 1000;          // hybrid: 1時間
 const FORECAST_REFRESH_MS_OPENMETEO = 3 * 60 * 60 * 1000;
 
@@ -142,6 +143,8 @@ let baselineScaleCache = new Map();
 
 const HORIZONS = ["now", "today", "tomorrow"];
 let currentHorizon = "today";
+const COLOR_PREVIEW_MODES = ["live", "day", "night"];
+let currentColorPreviewMode = "live";
 const LIST_MODES = ["prefecture", "facility"];
 let currentListMode = "prefecture";
 const WEATHER_FILL_MODES = ["prefecture", "grid"];
@@ -410,30 +413,42 @@ function buildPrefForecastRows(prefList, horizon) {
   return out;
 }
 
-function lerpColor(a, b, t) {
-  const ah = parseInt(a.slice(1), 16);
-  const bh = parseInt(b.slice(1), 16);
-  const ar = (ah >> 16) & 0xff, ag = (ah >> 8) & 0xff, ab = ah & 0xff;
-  const br = (bh >> 16) & 0xff, bg = (bh >> 8) & 0xff, bb = bh & 0xff;
-  const r = Math.round(ar + (br - ar) * t);
-  const g = Math.round(ag + (bg - ag) * t);
-  const bl = Math.round(ab + (bb - ab) * t);
-  return `#${r.toString(16).padStart(2, "0")}${g.toString(16).padStart(2, "0")}${bl.toString(16).padStart(2, "0")}`;
+function weatherColor(cloudPct, latitude, longitude) {
+  const displayCloudPct = cloudPctForDisplay(cloudPct, longitude);
+  return window.SolarColors.weatherColor(displayCloudPct, {
+    horizon: currentHorizon,
+    lat: latitude,
+    lon: longitude,
+    forceTimeOfDay: currentColorPreviewMode === "live" ? undefined : currentColorPreviewMode,
+  });
 }
 
-function weatherColor(cloudPct) {
-  if (!Number.isFinite(cloudPct)) return "#f8fafc";
-  const t = Math.max(0, Math.min(cloudPct / 100, 1));
-  if (t < 0.5) return lerpColor("#fb923c", "#fde68a", t * 2);
-  return lerpColor("#fde68a", "#94a3b8", (t - 0.5) * 2);
+function mapOutlineColor() {
+  const forceTimeOfDay = currentColorPreviewMode === "live" ? undefined : currentColorPreviewMode;
+  const isNight = window.SolarColors.isNightAt({
+    forceTimeOfDay,
+    horizon: currentHorizon,
+    lat: 35.68,
+    lon: 139.76,
+  });
+  return isNight
+    ? window.SolarColors.PALETTE.mapOutlineOnDark
+    : window.SolarColors.PALETTE.mapOutlineOnLight;
+}
+
+function cloudPctForDisplay(cloudPct, longitude) {
+  if (currentColorPreviewMode === "live") return cloudPct;
+  return window.SolarColors.longitudeCloudGradient(longitude);
+}
+
+function generationValueForDisplay(value, max, longitude) {
+  if (currentColorPreviewMode === "live") return value;
+  const cloudPct = cloudPctForDisplay(0, longitude);
+  return Math.max(max, 1) * (1 - cloudPct / 100);
 }
 
 function markerColor(value, max) {
-  if (!max) return "#38bdf8";
-  const ratio = Math.max(0, Math.min(value / max, 1));
-  if (ratio < 0.45) return "#38bdf8";
-  if (ratio < 0.75) return "#22c55e";
-  return "#d97706";
+  return window.SolarColors.generationColor(value, max);
 }
 
 function markerRadius(capacityMw, maxCapacityMw) {
@@ -696,10 +711,13 @@ function facilityRadius(capacityMw, maxMw) {
 }
 
 function facilityRateColor(rate) {
-  if (!Number.isFinite(rate) || rate <= 0) return "#cbd5e1";
-  const t = Math.max(0, Math.min(rate / 0.30, 1));
-  if (t < 0.5) return lerpColor("#38bdf8", "#22c55e", t * 2);
-  return lerpColor("#22c55e", "#ea580c", (t - 0.5) * 2);
+  return window.SolarColors.generationRateColor(rate);
+}
+
+function facilityColorForDisplay(facility) {
+  if (currentColorPreviewMode === "live") return facilityRateColor(facility.capacityFactor);
+  const cloudPct = cloudPctForDisplay(0, facility.longitude);
+  return facilityRateColor(0.30 * (1 - cloudPct / 100));
 }
 
 function facilityDisplayName(f) {
@@ -891,7 +909,7 @@ function addFacilityLayer(map, facilities) {
       radius: facilityRadius(f.capacityMw, maxMw),
       color: "#1f2937",
       weight: 0.8,
-      fillColor: facilityRateColor(f.capacityFactor),
+      fillColor: facilityColorForDisplay(f),
       fillOpacity: 0.85,
     });
     m.bindTooltip(facilityTooltipHtml(f), { direction: "top", offset: [0, -4], sticky: false });
@@ -911,7 +929,7 @@ function updateFacilityMarkers(facilities) {
     const key = facilityKey(f);
     const m = facilityMarkerById.get(key);
     if (!m) continue;
-    m.setStyle({ fillColor: facilityRateColor(f.capacityFactor) });
+    m.setStyle({ fillColor: facilityColorForDisplay(f) });
     m.setTooltipContent(facilityTooltipHtml(f));
     m.setPopupContent(facilityPopupHtml(f));
   }
@@ -959,8 +977,8 @@ function buildWeatherGridRows(gridForecast, step, horizon) {
   return rows;
 }
 
-function weatherGridColor(cloudPct) {
-  return Number.isFinite(cloudPct) ? weatherColor(cloudPct) : "#bfdbfe";
+function weatherGridColor(cloudPct, latitude, longitude) {
+  return weatherColor(cloudPct, latitude, longitude);
 }
 
 function publishWeatherGridStats() {
@@ -1014,7 +1032,7 @@ function updateWeatherGridLayer() {
     const cell = L.rectangle(gridCellBounds(row.lat, row.lon, facilityGridStep), {
       pane: "weatherGridPane",
       stroke: false,
-      fillColor: weatherGridColor(row.cloudPct),
+      fillColor: weatherGridColor(row.cloudPct, row.lat, row.lon),
       fillOpacity: WEATHER_GRID_FILL_OPACITY,
       interactive: false,
     });
@@ -1059,7 +1077,7 @@ function initMap(japanTopo, facilities) {
   map.createPane("prefecturePane");
   map.getPane("prefecturePane").style.zIndex = 390;
   map.createPane("weatherGridPane");
-  map.getPane("weatherGridPane").style.zIndex = 410;
+  map.getPane("weatherGridPane").style.zIndex = 380;
   map.createPane("forecastMarkerPane");
   map.getPane("forecastMarkerPane").style.zIndex = 450;
   map.createPane("facilityMarkerPane");
@@ -1071,10 +1089,10 @@ function initMap(japanTopo, facilities) {
     prefectureGeoLayer = L.geoJSON(gj, {
       pane: "prefecturePane",
       style: () => ({
-        color: "#8a9fa8",
+        color: mapOutlineColor(),
         weight: 0.6,
         fillColor: "#f8fafc",
-        fillOpacity: 0.7,
+        fillOpacity: WEATHER_PREFECTURE_FILL_OPACITY,
       }),
       interactive: false,
     }).addTo(map);
@@ -1110,10 +1128,12 @@ function updatePrefectureLayer(rows) {
   prefectureGeoLayer.setStyle((feature) => {
     const r = byPref.get(feature.properties.nam_ja);
     return {
-      color: "#8a9fa8",
+      color: mapOutlineColor(),
       weight: 0.6,
-      fillColor: showPrefectureWeather ? weatherColor(r?.cloudCoverPct) : "#f8fafc",
-      fillOpacity: showPrefectureWeather ? 0.7 : 0,
+      fillColor: showPrefectureWeather
+        ? weatherColor(r?.cloudCoverPct, r?.latitude, r?.longitude)
+        : window.SolarColors.PALETTE.missing,
+      fillOpacity: showPrefectureWeather ? WEATHER_PREFECTURE_FILL_OPACITY : 0,
     };
   });
 }
@@ -1128,12 +1148,14 @@ function updateForecastMarkers(rows) {
   const rateLabel = currentHorizon === "now" ? "出力率" : "設備利用率";
 
   for (const row of rows) {
+    const displayCloudPct = cloudPctForDisplay(row.cloudCoverPct, row.longitude);
+    const displayGeneration = generationValueForDisplay(row.estimatedMwh, maxGeneration, row.longitude);
     const marker = L.circleMarker([row.latitude, row.longitude], {
       pane: "forecastMarkerPane",
       radius: markerRadius(row.capacityMw, maxCapacityMw),
       color: "#ffffff",
       weight: 2,
-      fillColor: markerColor(row.estimatedMwh, maxGeneration),
+      fillColor: markerColor(displayGeneration, Math.max(maxGeneration, 1)),
       fillOpacity: 0.82,
       opacity: 1,
     });
@@ -1142,10 +1164,14 @@ function updateForecastMarkers(rows) {
       ? `${numberFormat.format(row.estimatedMwh * 1000)} kW`
       : `${numberFormat.format(row.estimatedMwh)} MWh`;
 
+    const tooltipValue = currentColorPreviewMode === "live"
+      ? generationText
+      : `${currentColorPreviewMode === "day" ? "昼" : "夜"}ダミー / 発電色 ${Math.round(100 - displayCloudPct)}%`;
+    const tooltipCloudPct = currentColorPreviewMode === "live" ? row.cloudCoverPct : displayCloudPct;
     marker.bindTooltip(
       `<div class="tooltip-pref">${row.prefecture}</div>
-       <div class="tooltip-val">${generationText}</div>
-       <div class="tooltip-sub">雲量 ${oneDecimalFormat.format(row.cloudCoverPct)}%</div>`,
+       <div class="tooltip-val">${tooltipValue}</div>
+       <div class="tooltip-sub">雲量 ${oneDecimalFormat.format(tooltipCloudPct)}%</div>`,
       { direction: "top", offset: [0, -6], sticky: false }
     );
 
@@ -1872,12 +1898,54 @@ function reapplyAllForHorizon() {
   }
 }
 
+function updateLegendForHorizon() {
+  const nightLegend = document.querySelector("#legend-weather-night");
+  if (nightLegend) {
+    const showNightLegend = currentColorPreviewMode === "night"
+      || (currentColorPreviewMode === "live" && currentHorizon === "now");
+    nightLegend.hidden = !showNightLegend;
+  }
+}
+
+function updateColorPreviewControl() {
+  const root = document.querySelector("#color-preview-control");
+  if (!root) return;
+  root.dataset.preview = currentColorPreviewMode;
+  root.querySelector("#color-preview-status").textContent = currentColorPreviewMode === "live"
+    ? "実データ"
+    : `${currentColorPreviewMode === "day" ? "昼" : "夜"} / 福岡0% → 札幌100%`;
+  root.querySelectorAll("[data-color-preview]").forEach((button) => {
+    button.setAttribute("aria-pressed", String(button.dataset.colorPreview === currentColorPreviewMode));
+  });
+}
+
+function setColorPreviewMode(mode) {
+  if (!COLOR_PREVIEW_MODES.includes(mode)) return;
+  currentColorPreviewMode = mode;
+  updateColorPreviewControl();
+  updateLegendForHorizon();
+  if (prefForecastRowsCache.length) {
+    updatePrefectureLayer(prefForecastRowsCache);
+    updateForecastMarkers(prefForecastRowsCache);
+  }
+  if (facilitiesCache.length) updateFacilityMarkers(facilitiesCache);
+  updateWeatherGridLayer();
+}
+
+function bindColorPreviewControl() {
+  document.querySelectorAll("[data-color-preview]").forEach((button) => {
+    button.addEventListener("click", () => setColorPreviewMode(button.dataset.colorPreview));
+  });
+  updateColorPreviewControl();
+}
+
 function bindHorizonControl() {
   document.querySelectorAll('input[name="horizon"]').forEach((input) => {
     input.addEventListener("change", (e) => {
       const value = e.target.value;
       if (!HORIZONS.includes(value)) return;
       currentHorizon = value;
+      updateLegendForHorizon();
       reapplyAllForHorizon();
     });
   });
@@ -1930,6 +1998,8 @@ async function main() {
     initMap(japanTopo, facilities);
     bindHorizonControl();
     bindListModeControl();
+    bindColorPreviewControl();
+    updateLegendForHorizon();
     renderActiveList();
   } catch (error) {
     renderError(error);

@@ -199,18 +199,23 @@ h3 {
 }
 
 .legend-dot.low {
-  background: #38bdf8;
+  background: var(--generation-low, #3730a3);
 }
 
 .legend-dot.high {
-  background: var(--accent-2);
+  background: var(--generation-high, #facc15);
 }
 
 .legend-bar {
   flex: 1;
   height: 8px;
   border-radius: 999px;
-  background: linear-gradient(90deg, #38bdf8, #22c55e, var(--accent-2));
+  background: linear-gradient(
+    90deg,
+    var(--generation-low, #3730a3),
+    var(--generation-mid, #0891b2),
+    var(--generation-high, #facc15)
+  );
 }
 
 .legend-gti-bar {
@@ -224,21 +229,74 @@ h3 {
   flex: 1;
   height: 8px;
   border-radius: 999px;
-  background: linear-gradient(90deg, #fb923c, #fde68a, #94a3b8);
+  background: linear-gradient(
+    90deg,
+    var(--weather-day-clear, #fb923c),
+    var(--weather-day-partly-cloudy, #fde68a),
+    var(--weather-day-overcast, #64748b)
+  );
+}
+
+.legend-weather-night {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.legend-weather-night[hidden] {
+  display: none;
+}
+
+.legend-weather-night-bar {
+  flex: 1;
+  height: 8px;
+  border-radius: 999px;
+  background: linear-gradient(
+    90deg,
+    var(--weather-night-clear, #172554),
+    var(--weather-night-partly-cloudy, #334155),
+    var(--weather-night-overcast, #94a3b8)
+  );
 }
 
 .legend-facility-bar {
   flex: 1;
   height: 8px;
   border-radius: 999px;
-  background: linear-gradient(90deg, #38bdf8, #22c55e, #ea580c);
+  background: linear-gradient(
+    90deg,
+    var(--generation-low, #3730a3),
+    var(--generation-mid, #0891b2),
+    var(--generation-high, #facc15)
+  );
 }
 
-.legend-gti-labels {
+.legend-gti-labels,
+.legend-scale-labels {
   display: flex;
   justify-content: space-between;
   font-size: 11px;
   color: var(--muted);
+}
+
+.legend-scale-labels {
+  padding: 0 18px;
+}
+
+.legend-missing {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 2px;
+  font-size: 11px;
+}
+
+.legend-missing-swatch {
+  width: 10px;
+  height: 10px;
+  border: 1px solid #9ca3af;
+  border-radius: 2px;
+  background: var(--missing, #d1d5db);
 }
 
 .leaflet-tooltip {
@@ -320,6 +378,94 @@ h3 {
 .list-mode-control input {
   appearance: none;
   margin: 0;
+}
+
+.color-preview-control {
+  margin-bottom: 14px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #f8fafc;
+}
+
+.color-preview-head,
+.color-preview-axis {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.color-preview-head {
+  margin-bottom: 8px;
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+#color-preview-status {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.color-preview-buttons {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 5px;
+}
+
+.color-preview-buttons button {
+  padding: 7px 5px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: #ffffff;
+  color: var(--muted);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.color-preview-buttons button[aria-pressed="true"] {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #ffffff;
+}
+
+.color-preview-buttons button:focus-visible {
+  outline: 3px solid rgba(14, 165, 164, 0.28);
+  outline-offset: 2px;
+}
+
+.color-preview-gradient {
+  height: 6px;
+  margin-top: 9px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #e5e7eb, #f8fafc, #e5e7eb);
+}
+
+.color-preview-control[data-preview="day"] .color-preview-gradient {
+  background: linear-gradient(
+    90deg,
+    var(--weather-day-clear, #fb923c),
+    var(--weather-day-partly-cloudy, #fde68a),
+    var(--weather-day-overcast, #64748b)
+  );
+}
+
+.color-preview-control[data-preview="night"] .color-preview-gradient {
+  background: linear-gradient(
+    90deg,
+    var(--weather-night-clear, #172554),
+    var(--weather-night-partly-cloudy, #334155),
+    var(--weather-night-overcast, #94a3b8)
+  );
+}
+
+.color-preview-axis {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
 }
 
 .metric-grid {
