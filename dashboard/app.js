@@ -152,6 +152,7 @@ let currentWeatherFillMode = "prefecture";
 
 let leafletMap = null;
 let prefectureGeoLayer = null;
+let prefectureOutlineLayer = null;
 let weatherGridLayer = null;
 let forecastMarkersLayer = null;
 let forecastMarkerByPref = new Map();
@@ -423,17 +424,26 @@ function weatherColor(cloudPct, latitude, longitude) {
   });
 }
 
-function mapOutlineColor() {
+function isNightMap() {
   const forceTimeOfDay = currentColorPreviewMode === "live" ? undefined : currentColorPreviewMode;
-  const isNight = window.SolarColors.isNightAt({
+  return window.SolarColors.isNightAt({
     forceTimeOfDay,
     horizon: currentHorizon,
     lat: 35.68,
     lon: 139.76,
   });
-  return isNight
-    ? window.SolarColors.PALETTE.mapOutlineOnDark
-    : window.SolarColors.PALETTE.mapOutlineOnLight;
+}
+
+function mapLandColor() {
+  return isNightMap()
+    ? window.SolarColors.PALETTE.mapLandNight
+    : window.SolarColors.PALETTE.mapLandDay;
+}
+
+function mapOutlineColor() {
+  return isNightMap()
+    ? window.SolarColors.PALETTE.mapOutlineNight
+    : window.SolarColors.PALETTE.mapOutlineDay;
 }
 
 function cloudPctForDisplay(cloudPct, longitude) {
@@ -1074,8 +1084,10 @@ function initMap(japanTopo, facilities) {
   leafletMap = map;
   L.control.zoom({ position: "bottomright" }).addTo(map);
 
-  map.createPane("prefecturePane");
-  map.getPane("prefecturePane").style.zIndex = 390;
+  map.createPane("prefectureLandPane");
+  map.getPane("prefectureLandPane").style.zIndex = 370;
+  map.createPane("prefectureOutlinePane");
+  map.getPane("prefectureOutlinePane").style.zIndex = 390;
   map.createPane("weatherGridPane");
   map.getPane("weatherGridPane").style.zIndex = 380;
   map.createPane("forecastMarkerPane");
@@ -1087,12 +1099,23 @@ function initMap(japanTopo, facilities) {
     const objKey = Object.keys(japanTopo.objects)[0];
     const gj = topojson.feature(japanTopo, japanTopo.objects[objKey]);
     prefectureGeoLayer = L.geoJSON(gj, {
-      pane: "prefecturePane",
+      pane: "prefectureLandPane",
+      style: () => ({
+        stroke: false,
+        fillColor: mapLandColor(),
+        fillOpacity: WEATHER_PREFECTURE_FILL_OPACITY,
+      }),
+      interactive: false,
+    }).addTo(map);
+    prefectureOutlineLayer = L.geoJSON(gj, {
+      pane: "prefectureOutlinePane",
       style: () => ({
         color: mapOutlineColor(),
-        weight: 0.6,
-        fillColor: "#f8fafc",
-        fillOpacity: WEATHER_PREFECTURE_FILL_OPACITY,
+        weight: 0.8,
+        lineCap: "round",
+        lineJoin: "round",
+        fill: false,
+        opacity: 1,
       }),
       interactive: false,
     }).addTo(map);
@@ -1125,15 +1148,18 @@ function updatePrefectureLayer(rows) {
   if (!prefectureGeoLayer) return;
   const byPref = new Map(rows.map((r) => [r.prefecture, r]));
   const showPrefectureWeather = currentWeatherFillMode === "prefecture";
+  prefectureOutlineLayer?.setStyle({
+    color: mapOutlineColor(),
+    weight: 0.8,
+  });
   prefectureGeoLayer.setStyle((feature) => {
     const r = byPref.get(feature.properties.nam_ja);
     return {
-      color: mapOutlineColor(),
-      weight: 0.6,
+      stroke: false,
       fillColor: showPrefectureWeather
         ? weatherColor(r?.cloudCoverPct, r?.latitude, r?.longitude)
-        : window.SolarColors.PALETTE.missing,
-      fillOpacity: showPrefectureWeather ? WEATHER_PREFECTURE_FILL_OPACITY : 0,
+        : mapLandColor(),
+      fillOpacity: WEATHER_PREFECTURE_FILL_OPACITY,
     };
   });
 }

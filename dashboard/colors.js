@@ -1,16 +1,18 @@
 (function (root) {
   const PALETTE = Object.freeze({
-    generationLow: "#3730a3",
-    generationMid: "#0891b2",
-    generationHigh: "#facc15",
+    generationLow: "#052e16",
+    generationMid: "#22c55e",
+    generationHigh: "#22d3ee",
     weatherDayClear: "#fb923c",
     weatherDayPartlyCloudy: "#fde68a",
     weatherDayOvercast: "#64748b",
     weatherNightClear: "#172554",
     weatherNightPartlyCloudy: "#334155",
     weatherNightOvercast: "#94a3b8",
-    mapOutlineOnLight: "#0f172a",
-    mapOutlineOnDark: "#f8fafc",
+    mapLandDay: "#d8e1e9",
+    mapLandNight: "#59636f",
+    mapOutlineDay: "#0f172a",
+    mapOutlineNight: "#f8fafc",
     missing: "#d1d5db",
   });
 

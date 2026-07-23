@@ -69,8 +69,8 @@ test("map outline colors are outside every continuous legend scale", () => {
     [colors.PALETTE.weatherNightClear, colors.PALETTE.weatherNightPartlyCloudy, colors.PALETTE.weatherNightOvercast],
   ];
   const outlineColors = [
-    colors.PALETTE.mapOutlineOnLight,
-    colors.PALETTE.mapOutlineOnDark,
+    colors.PALETTE.mapOutlineDay,
+    colors.PALETTE.mapOutlineNight,
   ];
 
   for (const outlineColor of outlineColors) {
