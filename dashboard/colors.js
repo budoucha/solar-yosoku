@@ -54,14 +54,7 @@
     );
   }
 
-  function longitudeCloudGradient(longitude, west = 130.40, east = 141.35) {
-    if (!Number.isFinite(longitude) || !(east > west)) return NaN;
-    return Math.max(0, Math.min(100, ((longitude - west) / (east - west)) * 100));
-  }
-
-  function isNightAt({ forceTimeOfDay, horizon, lat, lon, date = new Date(), solarAltitude } = {}) {
-    if (forceTimeOfDay === "night") return true;
-    if (forceTimeOfDay === "day") return false;
+  function isNightAt({ horizon, lat, lon, date = new Date(), solarAltitude } = {}) {
     if (horizon !== "now" || !Number.isFinite(lat) || !Number.isFinite(lon)) return false;
     const altitude = solarAltitude || root.Solar?.solarAltitude;
     if (typeof altitude !== "function") return false;
@@ -103,7 +96,6 @@
     generationRateColor,
     isNightAt,
     lerpColor,
-    longitudeCloudGradient,
     weatherColor,
   };
   root.SolarColors = api;

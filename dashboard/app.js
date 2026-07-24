@@ -143,8 +143,6 @@ let baselineScaleCache = new Map();
 
 const HORIZONS = ["now", "today", "tomorrow"];
 let currentHorizon = "today";
-const COLOR_PREVIEW_MODES = ["live", "day", "night"];
-let currentColorPreviewMode = "live";
 const LIST_MODES = ["prefecture", "facility"];
 let currentListMode = "prefecture";
 const WEATHER_FILL_MODES = ["prefecture", "grid"];
@@ -415,19 +413,15 @@ function buildPrefForecastRows(prefList, horizon) {
 }
 
 function weatherColor(cloudPct, latitude, longitude) {
-  const displayCloudPct = cloudPctForDisplay(cloudPct, longitude);
-  return window.SolarColors.weatherColor(displayCloudPct, {
+  return window.SolarColors.weatherColor(cloudPct, {
     horizon: currentHorizon,
     lat: latitude,
     lon: longitude,
-    forceTimeOfDay: currentColorPreviewMode === "live" ? undefined : currentColorPreviewMode,
   });
 }
 
 function isNightMap() {
-  const forceTimeOfDay = currentColorPreviewMode === "live" ? undefined : currentColorPreviewMode;
   return window.SolarColors.isNightAt({
-    forceTimeOfDay,
     horizon: currentHorizon,
     lat: 35.68,
     lon: 139.76,
@@ -444,17 +438,6 @@ function mapOutlineColor() {
   return isNightMap()
     ? window.SolarColors.PALETTE.mapOutlineNight
     : window.SolarColors.PALETTE.mapOutlineDay;
-}
-
-function cloudPctForDisplay(cloudPct, longitude) {
-  if (currentColorPreviewMode === "live") return cloudPct;
-  return window.SolarColors.longitudeCloudGradient(longitude);
-}
-
-function generationValueForDisplay(value, max, longitude) {
-  if (currentColorPreviewMode === "live") return value;
-  const cloudPct = cloudPctForDisplay(0, longitude);
-  return Math.max(max, 1) * (1 - cloudPct / 100);
 }
 
 function markerColor(value, max) {
@@ -725,9 +708,7 @@ function facilityRateColor(rate) {
 }
 
 function facilityColorForDisplay(facility) {
-  if (currentColorPreviewMode === "live") return facilityRateColor(facility.capacityFactor);
-  const cloudPct = cloudPctForDisplay(0, facility.longitude);
-  return facilityRateColor(0.30 * (1 - cloudPct / 100));
+  return facilityRateColor(facility.capacityFactor);
 }
 
 function facilityDisplayName(f) {
@@ -1174,14 +1155,12 @@ function updateForecastMarkers(rows) {
   const rateLabel = currentHorizon === "now" ? "出力率" : "設備利用率";
 
   for (const row of rows) {
-    const displayCloudPct = cloudPctForDisplay(row.cloudCoverPct, row.longitude);
-    const displayGeneration = generationValueForDisplay(row.estimatedMwh, maxGeneration, row.longitude);
     const marker = L.circleMarker([row.latitude, row.longitude], {
       pane: "forecastMarkerPane",
       radius: markerRadius(row.capacityMw, maxCapacityMw),
       color: "#ffffff",
       weight: 2,
-      fillColor: markerColor(displayGeneration, Math.max(maxGeneration, 1)),
+      fillColor: markerColor(row.estimatedMwh, Math.max(maxGeneration, 1)),
       fillOpacity: 0.82,
       opacity: 1,
     });
@@ -1190,14 +1169,10 @@ function updateForecastMarkers(rows) {
       ? `${numberFormat.format(row.estimatedMwh * 1000)} kW`
       : `${numberFormat.format(row.estimatedMwh)} MWh`;
 
-    const tooltipValue = currentColorPreviewMode === "live"
-      ? generationText
-      : `${currentColorPreviewMode === "day" ? "昼" : "夜"}ダミー / 発電色 ${Math.round(100 - displayCloudPct)}%`;
-    const tooltipCloudPct = currentColorPreviewMode === "live" ? row.cloudCoverPct : displayCloudPct;
     marker.bindTooltip(
       `<div class="tooltip-pref">${row.prefecture}</div>
-       <div class="tooltip-val">${tooltipValue}</div>
-       <div class="tooltip-sub">雲量 ${oneDecimalFormat.format(tooltipCloudPct)}%</div>`,
+       <div class="tooltip-val">${generationText}</div>
+       <div class="tooltip-sub">雲量 ${oneDecimalFormat.format(row.cloudCoverPct)}%</div>`,
       { direction: "top", offset: [0, -6], sticky: false }
     );
 
@@ -1927,42 +1902,8 @@ function reapplyAllForHorizon() {
 function updateLegendForHorizon() {
   const nightLegend = document.querySelector("#legend-weather-night");
   if (nightLegend) {
-    const showNightLegend = currentColorPreviewMode === "night"
-      || (currentColorPreviewMode === "live" && currentHorizon === "now");
-    nightLegend.hidden = !showNightLegend;
+    nightLegend.hidden = currentHorizon !== "now";
   }
-}
-
-function updateColorPreviewControl() {
-  const root = document.querySelector("#color-preview-control");
-  if (!root) return;
-  root.dataset.preview = currentColorPreviewMode;
-  root.querySelector("#color-preview-status").textContent = currentColorPreviewMode === "live"
-    ? "実データ"
-    : `${currentColorPreviewMode === "day" ? "昼" : "夜"} / 福岡0% → 札幌100%`;
-  root.querySelectorAll("[data-color-preview]").forEach((button) => {
-    button.setAttribute("aria-pressed", String(button.dataset.colorPreview === currentColorPreviewMode));
-  });
-}
-
-function setColorPreviewMode(mode) {
-  if (!COLOR_PREVIEW_MODES.includes(mode)) return;
-  currentColorPreviewMode = mode;
-  updateColorPreviewControl();
-  updateLegendForHorizon();
-  if (prefForecastRowsCache.length) {
-    updatePrefectureLayer(prefForecastRowsCache);
-    updateForecastMarkers(prefForecastRowsCache);
-  }
-  if (facilitiesCache.length) updateFacilityMarkers(facilitiesCache);
-  updateWeatherGridLayer();
-}
-
-function bindColorPreviewControl() {
-  document.querySelectorAll("[data-color-preview]").forEach((button) => {
-    button.addEventListener("click", () => setColorPreviewMode(button.dataset.colorPreview));
-  });
-  updateColorPreviewControl();
 }
 
 function bindHorizonControl() {
@@ -2024,7 +1965,6 @@ async function main() {
     initMap(japanTopo, facilities);
     bindHorizonControl();
     bindListModeControl();
-    bindColorPreviewControl();
     updateLegendForHorizon();
     renderActiveList();
   } catch (error) {

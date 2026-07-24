@@ -39,24 +39,6 @@ test("night palette is used only for the current horizon below the horizon", () 
   assert.equal(colors.weatherColor(0, daily), colors.PALETTE.weatherDayClear);
 });
 
-test("forced preview time of day overrides the actual solar state", () => {
-  assert.equal(
-    colors.weatherColor(0, { forceTimeOfDay: "night", solarAltitude: () => 0.5 }),
-    colors.PALETTE.weatherNightClear,
-  );
-  assert.equal(
-    colors.weatherColor(0, { forceTimeOfDay: "day", solarAltitude: () => -0.5 }),
-    colors.PALETTE.weatherDayClear,
-  );
-});
-
-test("longitude preview gradient runs from clear west to overcast east", () => {
-  assert.equal(colors.longitudeCloudGradient(130.40), 0);
-  assert.equal(colors.longitudeCloudGradient(135.875), 50);
-  assert.equal(colors.longitudeCloudGradient(141.35), 100);
-  assert.equal(colors.longitudeCloudGradient(145), 100);
-});
-
 test("weather missing values use the shared missing-data color", () => {
   assert.equal(colors.weatherColor(undefined), colors.PALETTE.missing);
   assert.equal(colors.generationRateColor(undefined), colors.PALETTE.missing);
