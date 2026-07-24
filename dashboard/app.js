@@ -35,6 +35,7 @@ const BASELINE_SCALE_MIN = 0.25;
 const BASELINE_SCALE_MAX = 1.25;
 const FACILITY_CAPACITY_THRESHOLDS_MW = [5, 10, 50];
 const DEFAULT_FACILITY_CAPACITY_THRESHOLD_MW = 5;
+const DASHBOARD_PREFERENCES_KEY = "solar_dashboard_preferences_v1";
 
 const progressStart = 0;
 const progressState = new Map();
@@ -142,11 +143,18 @@ let baselineByPref = null;  // { 県名: { lat, lon, monthly_ghi_kwh_m2_day: [12
 let baselineScaleCache = new Map();
 
 const HORIZONS = ["now", "today", "tomorrow"];
-let currentHorizon = "today";
 const LIST_MODES = ["prefecture", "facility"];
-let currentListMode = "prefecture";
 const WEATHER_FILL_MODES = ["prefecture", "grid"];
-let currentWeatherFillMode = "prefecture";
+const savedDashboardPreferences = loadDashboardPreferences();
+let currentHorizon = HORIZONS.includes(savedDashboardPreferences.horizon)
+  ? savedDashboardPreferences.horizon
+  : "today";
+let currentListMode = LIST_MODES.includes(savedDashboardPreferences.listMode)
+  ? savedDashboardPreferences.listMode
+  : "prefecture";
+let currentWeatherFillMode = WEATHER_FILL_MODES.includes(savedDashboardPreferences.weatherFillMode)
+  ? savedDashboardPreferences.weatherFillMode
+  : "prefecture";
 
 let leafletMap = null;
 let prefectureGeoLayer = null;
@@ -157,7 +165,11 @@ let forecastMarkerByPref = new Map();
 let hiddenPrefs = new Set();
 let facilityMarkersLayer = null;
 let hiddenFacilities = new Set();
-let currentFacilityCapacityThresholdMw = DEFAULT_FACILITY_CAPACITY_THRESHOLD_MW;
+let currentFacilityCapacityThresholdMw = FACILITY_CAPACITY_THRESHOLDS_MW.includes(
+  savedDashboardPreferences.facilityCapacityThresholdMw
+)
+  ? savedDashboardPreferences.facilityCapacityThresholdMw
+  : DEFAULT_FACILITY_CAPACITY_THRESHOLD_MW;
 let prefRowsCache = null;
 let prefForecastRowsCache = [];
 let prefHourlyCache = new Map();
@@ -186,6 +198,37 @@ const percentFormat = new Intl.NumberFormat("ja-JP", {
   style: "percent",
   maximumFractionDigits: 1,
 });
+
+function loadDashboardPreferences() {
+  try {
+    const value = JSON.parse(localStorage.getItem(DASHBOARD_PREFERENCES_KEY) || "{}");
+    return value && typeof value === "object" ? value : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveDashboardPreferences() {
+  try {
+    localStorage.setItem(DASHBOARD_PREFERENCES_KEY, JSON.stringify({
+      weatherFillMode: currentWeatherFillMode,
+      facilityCapacityThresholdMw: currentFacilityCapacityThresholdMw,
+      horizon: currentHorizon,
+      listMode: currentListMode,
+    }));
+  } catch {
+    // Storage may be unavailable in private browsing or under a restrictive policy.
+  }
+}
+
+function syncOverviewControls() {
+  document.querySelectorAll('input[name="horizon"]').forEach((input) => {
+    input.checked = input.value === currentHorizon;
+  });
+  document.querySelectorAll('input[name="list-mode"]').forEach((input) => {
+    input.checked = input.value === currentListMode;
+  });
+}
 
 function parseCsv(text) {
   const rows = [];
@@ -796,6 +839,7 @@ function renderFacilityLayer() {
 function setFacilityCapacityThreshold(thresholdMw) {
   if (!FACILITY_CAPACITY_THRESHOLDS_MW.includes(thresholdMw)) return;
   currentFacilityCapacityThresholdMw = thresholdMw;
+  saveDashboardPreferences();
   renderFacilityLayer();
   if (currentListMode === "facility") renderActiveList();
 }
@@ -851,6 +895,7 @@ function updateWeatherFillLayers() {
 function setWeatherFillMode(mode) {
   if (!WEATHER_FILL_MODES.includes(mode)) return;
   currentWeatherFillMode = mode;
+  saveDashboardPreferences();
   updateWeatherFillLayers();
 }
 
@@ -1912,6 +1957,7 @@ function bindHorizonControl() {
       const value = e.target.value;
       if (!HORIZONS.includes(value)) return;
       currentHorizon = value;
+      saveDashboardPreferences();
       updateLegendForHorizon();
       reapplyAllForHorizon();
     });
@@ -1924,6 +1970,7 @@ function bindListModeControl() {
       const value = e.target.value;
       if (!LIST_MODES.includes(value)) return;
       currentListMode = value;
+      saveDashboardPreferences();
       renderActiveList();
       renderFacilityLayer();
     });
@@ -1963,6 +2010,7 @@ async function main() {
     });
 
     initMap(japanTopo, facilities);
+    syncOverviewControls();
     bindHorizonControl();
     bindListModeControl();
     updateLegendForHorizon();
